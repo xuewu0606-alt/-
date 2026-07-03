@@ -193,6 +193,9 @@ class RuntimeSchedulerService:
             self._record_analysis_busy_skip()
             return False
         try:
+            from src.scheduler import mark_daily_task_run
+
+            mark_daily_task_run()
             self._run_analysis_locked(stock_codes)
         finally:
             self._run_lock.release()

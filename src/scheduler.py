@@ -79,6 +79,18 @@ class GracefulShutdown:
             return self.shutdown_requested
 
 
+# 最近一次每日任务执行时间戳（模块级）。跨 Scheduler 实例共享：
+# runtime scheduler 在保存设置时会重建实例，若用实例属性，重建后启动追赶
+# 会误判“计划点刚错过且未执行”而重复补跑。
+_LAST_DAILY_TASK_RUN_TS: float = 0.0
+
+
+def mark_daily_task_run() -> None:
+    """外部执行了等价的每日任务（如手动“立即运行”）时调用，避免启动追赶重复补跑。"""
+    global _LAST_DAILY_TASK_RUN_TS
+    _LAST_DAILY_TASK_RUN_TS = time.time()
+
+
 class Scheduler:
     """
     定时任务调度器
@@ -96,12 +108,17 @@ class Scheduler:
         schedule_times: Optional[Sequence[str]] = None,
         schedule_times_provider: Optional[Callable[[], Union[Sequence[str], str]]] = None,
         register_signals: bool = True,
+        catchup_grace_seconds: int = 600,
     ):
         """
         初始化调度器
 
         Args:
             schedule_time: 每日执行时间，格式 "HH:MM"
+            catchup_grace_seconds: 启动追赶宽限期（秒）。启动时若当天某个计划点
+                刚错过且在该宽限期内，立即补跑一次；0 或负数禁用追赶。
+                背景：schedule 库注册 `.at("15:10")` 时若当天 15:10 已过会直接排到
+                明天，程序恰好在计划点之后启动（如启动耗时跨过整点）会静默丢失当天任务。
         """
         try:
             import schedule
@@ -124,6 +141,7 @@ class Scheduler:
         self._daily_jobs: List[Any] = []
         self._background_tasks: List[Dict[str, Any]] = []
         self._running = False
+        self.catchup_grace_seconds = int(catchup_grace_seconds)
 
     def set_daily_task(self, task: Callable, run_immediately: bool = True):
         """
@@ -280,9 +298,11 @@ class Scheduler:
 
     def _safe_run_task(self):
         """安全执行任务（带异常捕获）"""
+        global _LAST_DAILY_TASK_RUN_TS
         if self._task_callback is None:
             return
 
+        _LAST_DAILY_TASK_RUN_TS = time.time()
         try:
             logger.info("=" * 50)
             logger.info(f"定时任务开始执行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -378,6 +398,39 @@ class Scheduler:
                 continue
             self._start_background_task(entry)
 
+    def _run_startup_catchup(self) -> None:
+        """启动追赶：当天计划点刚错过（宽限期内）且任务未执行过时，补跑一次。"""
+        if self._task_callback is None or self.catchup_grace_seconds <= 0:
+            return
+
+        now = datetime.now()
+        missed: List[str] = []
+        for item in self.schedule_times:
+            if not self._is_valid_schedule_time(item):
+                continue
+            hour, minute = (int(part) for part in item.split(":"))
+            slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            elapsed = (now - slot).total_seconds()
+            if 0 <= elapsed <= self.catchup_grace_seconds:
+                missed.append(item)
+
+        if not missed:
+            return
+
+        if _LAST_DAILY_TASK_RUN_TS and time.time() - _LAST_DAILY_TASK_RUN_TS <= self.catchup_grace_seconds:
+            logger.info(
+                "启动追赶：计划点 %s 刚错过，但任务近期已执行（如启动时立即执行或调度器重建），跳过补跑",
+                ",".join(missed),
+            )
+            return
+
+        logger.info(
+            "启动追赶：今日计划点 %s 已错过（在 %d 秒宽限期内），立即补跑一次",
+            ",".join(missed),
+            self.catchup_grace_seconds,
+        )
+        self._safe_run_task()
+
     def run(self):
         """
         运行调度器主循环
@@ -387,6 +440,7 @@ class Scheduler:
         self._running = True
         logger.info("调度器开始运行...")
         logger.info(f"下次执行时间: {self._get_next_run_time()}")
+        self._run_startup_catchup()
 
         while self._running and not self.shutdown_handler.should_shutdown:
             self._refresh_daily_schedule_if_needed()
