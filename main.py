@@ -44,6 +44,15 @@ if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").low
     proxy_url = f"http://{proxy_host}:{proxy_port}"
     os.environ["http_proxy"] = proxy_url
     os.environ["https_proxy"] = proxy_url
+else:
+    # 未启用 USE_PROXY 时，主动清除系统/VPN 残留的代理环境变量，
+    # 避免进程继承到已失效的本地代理（如 127.0.0.1:10808）导致行情/模型/推送等
+    # 所有外网请求失败（[WinError 10061] 由于目标计算机积极拒绝，无法连接）。
+    for _proxy_var in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    ):
+        os.environ.pop(_proxy_var, None)
 
 if os.getenv("DSA_PACKAGED_ALPHASIFT_IMPORT_PROBE") == "1":
     import importlib
@@ -1065,7 +1074,11 @@ def start_api_server(host: str, port: int, config: Config) -> None:
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
 
-    timeout_seconds = 3.0
+    # 首次启动需在后台线程导入 api.app:app，会拉起 litellm、lark-oapi(飞书 SDK)、
+    # pandas/akshare 等重依赖。在 Windows + 杀毒实时扫描的环境下，这些库的冷导入
+    # 实测可达 60~75s，远超旧默认值 30s，导致 "FastAPI 服务在 30.0s 内未完成启动"。
+    # 默认放宽到 120s 以匹配真实导入耗时；仍可用 WEBUI_STARTUP_TIMEOUT_SEC 覆盖。
+    timeout_seconds = float(os.getenv("WEBUI_STARTUP_TIMEOUT_SEC", "120"))
     wait_deadline = time.time() + timeout_seconds
     while time.time() < wait_deadline:
         if startup_error:

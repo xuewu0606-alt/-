@@ -24,8 +24,9 @@
 3. PytdxFetcher (Priority 2) - 来自 pytdx 库（通达信）
 4. TushareFetcher (Priority 2) - 来自 tushare 库（不可用）
 5. BaostockFetcher (Priority 3) - 来自 baostock 库
-6. YfinanceFetcher (Priority 4) - 来自 yfinance 库
-7. LongbridgeFetcher (Priority 5) - 长桥 OpenAPI（美股/港股兜底）
+6. GlobalStockFetcher (Priority 3) - 美股/港股直连备用（新浪/腾讯/东财/Yahoo，零认证）
+7. YfinanceFetcher (Priority 4) - 来自 yfinance 库
+8. LongbridgeFetcher (Priority 5) - 长桥 OpenAPI（美股/港股兜底）
 
 提示：优先级数字越小越优先，同优先级按初始化顺序排列
 """
@@ -41,6 +42,7 @@ from .yfinance_fetcher import YfinanceFetcher
 from .longbridge_fetcher import LongbridgeFetcher
 from .finnhub_fetcher import FinnhubFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher
+from .global_stock_fetcher import GlobalStockFetcher
 from .us_index_mapping import is_us_index_code, is_us_stock_code, get_us_index_yf_symbol, US_INDEX_MAPPING
 
 __all__ = [
@@ -56,6 +58,7 @@ __all__ = [
     'LongbridgeFetcher',
     'FinnhubFetcher',
     'AlphaVantageFetcher',
+    'GlobalStockFetcher',
     'is_us_index_code',
     'is_us_stock_code',
     'is_hk_stock_code',

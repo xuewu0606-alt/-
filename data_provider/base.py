@@ -1136,6 +1136,7 @@ class DataFetcherManager:
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
+        from .global_stock_fetcher import GlobalStockFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -1144,6 +1145,7 @@ class DataFetcherManager:
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
+        global_stock = GlobalStockFetcher()  # 美股/港股直连备用源（新浪/腾讯/东财/Yahoo，零认证）
         optional_fetchers: List[BaseFetcher] = []
 
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
@@ -1181,6 +1183,7 @@ class DataFetcherManager:
                 pytdx,
                 baostock,
                 yfinance,
+                global_stock,
                 *optional_fetchers,
             ]
 
@@ -3080,6 +3083,24 @@ class DataFetcherManager:
         else:
             institution_payload = dict(institution_payload)
 
+        # 东财(akshare)取不到基本面时，用 Tushare income + fina_indicator 兜底（按块独立判断）
+        _need_growth = not self._has_meaningful_payload(growth_payload)
+        _need_earnings = not self._has_meaningful_payload(earnings_payload)
+        if _need_growth or _need_earnings:
+            ts_fund = self._try_tushare_fundamentals(stock_code)
+            if isinstance(ts_fund, dict):
+                ts_growth = ts_fund.get("growth") if isinstance(ts_fund.get("growth"), dict) else {}
+                ts_earnings = ts_fund.get("earnings") if isinstance(ts_fund.get("earnings"), dict) else {}
+                filled = False
+                if _need_growth and self._has_meaningful_payload(ts_growth):
+                    growth_payload = dict(ts_growth)
+                    filled = True
+                if _need_earnings and self._has_meaningful_payload(ts_earnings):
+                    earnings_payload = dict(ts_earnings)
+                    filled = True
+                if filled:
+                    bundle_chain = list(bundle_chain) + ["fundamental:tushare_fina"]
+
         # Derive TTM dividend yield from already-fetched quote price; avoid extra quote calls.
         earnings_extra_errors: List[str] = []
         dividend_payload = earnings_payload.get("dividend")
@@ -3231,6 +3252,30 @@ class DataFetcherManager:
             self._prune_fundamental_cache(cache_ttl, cache_max_entries)
         return result_ctx
 
+    def _try_tushare_stock_flow(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """东财不可用时，从 TushareFetcher.moneyflow 兜底取个股资金流。fail-open。"""
+        try:
+            for fetcher in self._get_fetchers_snapshot():
+                if type(fetcher).__name__ == "TushareFetcher":
+                    getter = getattr(fetcher, "get_stock_money_flow", None)
+                    if getter is not None:
+                        return getter(stock_code)
+            return None
+        except Exception:
+            return None
+
+    def _try_tushare_fundamentals(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """东财不可用时，从 TushareFetcher 的 income+fina_indicator 兜底取基本面。fail-open。"""
+        try:
+            for fetcher in self._get_fetchers_snapshot():
+                if type(fetcher).__name__ == "TushareFetcher":
+                    getter = getattr(fetcher, "get_financial_fundamentals", None)
+                    if getter is not None:
+                        return getter(stock_code)
+            return None
+        except Exception:
+            return None
+
     def get_capital_flow_context(self, stock_code: str, budget_seconds: Optional[float] = None) -> Dict[str, Any]:
         """资金流向块（fail-open）。"""
         from src.config import get_config
@@ -3271,6 +3316,18 @@ class DataFetcherManager:
         has_stock_flow = False
         if isinstance(stock_flow, dict):
             has_stock_flow = any(v is not None for v in stock_flow.values())
+        # 东财(akshare)不可用时，用 Tushare moneyflow 兜底个股资金流
+        if not has_stock_flow:
+            ts_flow = self._try_tushare_stock_flow(stock_code)
+            if ts_flow and any(v is not None for v in ts_flow.values()):
+                stock_flow = ts_flow
+                payload["stock_flow"] = ts_flow
+                has_stock_flow = True
+                src_chain = payload.get("source_chain")
+                if not isinstance(src_chain, list):
+                    src_chain = []
+                    payload["source_chain"] = src_chain
+                src_chain.append("capital_stock:tushare_moneyflow")
         has_sector_rankings = bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
         adapter_status = str(payload.get("status", "not_supported"))
         if has_stock_flow or has_sector_rankings:

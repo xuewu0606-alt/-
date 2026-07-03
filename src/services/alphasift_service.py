@@ -1922,6 +1922,23 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
     put_default("LLM_CANDIDATE_MULTIPLIER", str(DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER))
     put_default("LLM_MAX_CANDIDATES", str(_resolve_dsa_llm_max_candidates(max_results)))
     put_default("SNAPSHOT_SOURCE_PRIORITY", _resolve_alphasift_snapshot_source_priority(config))
+    # AlphaSift 的 tushare 快照会把 SDK 的 http_url 覆盖为 http://api.waditu.com，
+    # 但 tushare SDK 真正的接口路径是 http://api.waditu.com/dataapi（缺少 /dataapi
+    # 时服务端返回 HTTP 200 但 0 行），导致 pro.daily(trade_date=...) 恒为空、快照源
+    # tushare 报“未返回可用数据”。这里注入带正确路径的官方地址覆盖该默认值，使 tushare
+    # 成为可靠的全市场快照源。用 put_default 保留用户显式 TUSHARE_API_URL 覆盖。
+    if _env_text(getattr(config, "tushare_token", None) or os.getenv("TUSHARE_TOKEN")):
+        put_default("TUSHARE_API_URL", "https://api.tushare.pro/dataapi")
+    # 注入最近 A 股交易日，让 AlphaSift 的 Tushare 快照跳过频次受限的 trade_cal，
+    # 直接用该日期调 daily_basic（含 volume_ratio）。失败则不注入，回退原行为。
+    try:
+        from src.core.trading_calendar import get_effective_trading_date
+
+        _eff_date = get_effective_trading_date("cn")
+        if _eff_date is not None:
+            put_default("TUSHARE_TRADE_DATE", _eff_date.strftime("%Y%m%d"))
+    except Exception:
+        pass
     alphasift_data_dir = _resolve_alphasift_data_dir()
     put_default("ALPHASIFT_DATA_DIR", str(alphasift_data_dir))
     put_default("ALPHASIFT_FALLBACK_SNAPSHOT_PATH", str(alphasift_data_dir / "snapshot.last_good.json"))

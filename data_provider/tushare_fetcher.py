@@ -667,6 +667,52 @@ class TushareFetcher(BaseFetcher):
 
         return None
     
+    def _enrich_quote_with_daily_basic(self, quote: Optional[UnifiedRealtimeQuote], stock_code: str) -> None:
+        """用 Tushare daily_basic 补齐 量比/换手率/PE/PB/市值 等缺失字段（A股，fail-open，原地修改）。
+
+        Tushare 实时报价接口不返回量比、换手率、PE 等，导致这些在报告里常显示"数据缺失"。
+        daily_basic（每日指标，2000 积分）一次即可拿到这些字段，用它补齐 quote 上为空的项。
+        市值单位为万元，统一换算为元。
+        """
+        from .realtime_types import safe_float
+
+        if quote is None or self._api is None or _is_hk_market(stock_code):
+            return
+        if (quote.volume_ratio is not None and quote.turnover_rate is not None
+                and quote.pe_ratio is not None and quote.pb_ratio is not None):
+            return
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+            if not ts_code or not ts_code.endswith((".SH", ".SZ", ".BJ")):
+                return
+            china_now = self._get_china_now()
+            df = self._call_api_with_rate_limit(
+                "daily_basic",
+                ts_code=ts_code,
+                start_date=(china_now - timedelta(days=15)).strftime("%Y%m%d"),
+                end_date=china_now.strftime("%Y%m%d"),
+                fields="ts_code,trade_date,turnover_rate,volume_ratio,pe,pe_ttm,pb,total_mv,circ_mv",
+            )
+            if df is None or df.empty:
+                return
+            row = df.sort_values("trade_date", ascending=False).iloc[0]
+            if quote.volume_ratio is None:
+                quote.volume_ratio = safe_float(row.get("volume_ratio"))
+            if quote.turnover_rate is None:
+                quote.turnover_rate = safe_float(row.get("turnover_rate"))
+            if quote.pe_ratio is None:
+                quote.pe_ratio = safe_float(row.get("pe_ttm")) or safe_float(row.get("pe"))
+            if quote.pb_ratio is None:
+                quote.pb_ratio = safe_float(row.get("pb"))
+            if quote.total_mv is None:
+                _tmv = safe_float(row.get("total_mv"))
+                quote.total_mv = _tmv * 10000.0 if _tmv is not None else None
+            if quote.circ_mv is None:
+                _cmv = safe_float(row.get("circ_mv"))
+                quote.circ_mv = _cmv * 10000.0 if _cmv is not None else None
+        except Exception as e:
+            logger.debug(f"[Tushare] daily_basic 补齐量比/换手率失败 {stock_code}: {e}")
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
         获取实时行情
@@ -709,7 +755,7 @@ class TushareFetcher(BaseFetcher):
                 row = df.iloc[0]
                 logger.debug(f"Tushare Pro 实时行情获取成功: {stock_code}")
 
-                return UnifiedRealtimeQuote(
+                quote = UnifiedRealtimeQuote(
                     code=normalized_code,
                     name=str(row.get('name', '')),
                     source=RealtimeSource.TUSHARE,
@@ -727,6 +773,8 @@ class TushareFetcher(BaseFetcher):
                     pb_ratio=safe_float(row.get('pb')),
                     total_mv=safe_float(row.get('total_mv')),
                 )
+                self._enrich_quote_with_daily_basic(quote, stock_code)
+                return quote
         except Exception as e:
             # 仅记录调试日志，不报错，继续尝试降级
             logger.debug(f"Tushare Pro 实时行情不可用 (可能是积分不足): {e}")
@@ -756,7 +804,7 @@ class TushareFetcher(BaseFetcher):
                 change_pct = (change_amount / pre_close) * 100
 
             # 构建统一对象
-            return UnifiedRealtimeQuote(
+            quote = UnifiedRealtimeQuote(
                 code=normalized_code,
                 name=str(row['name']),
                 source=RealtimeSource.TUSHARE,
@@ -770,6 +818,8 @@ class TushareFetcher(BaseFetcher):
                 open_price=safe_float(row['open']),
                 pre_close=pre_close,
             )
+            self._enrich_quote_with_daily_basic(quote, stock_code)
+            return quote
 
         except Exception as e:
             logger.warning(f"Tushare (旧版) 获取实时行情失败 {stock_code}: {e}")
@@ -1113,10 +1163,134 @@ class TushareFetcher(BaseFetcher):
         
         # 获取为空或者接口调用失败，返回 None
         return None
-    
-    
 
-    
+    def get_stock_money_flow(self, stock_code: str, lookback_days: int = 25) -> Optional[Dict[str, Any]]:
+        """
+        获取个股资金流向（Tushare moneyflow），作为东财不可用时的兜底源。
+
+        仅支持 A 股；返回与 akshare 资金流一致的结构（单位：元）：
+            {"main_net_inflow": x, "inflow_5d": x, "inflow_10d": x}
+        主力净流入 = 大单 + 特大单 的净买入额；Tushare moneyflow 金额单位为「万元」，
+        此处统一换算为「元」以与 akshare 口径一致。
+        2000 积分即可调用 moneyflow 接口。
+        """
+        if self._api is None:
+            return None
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+        except Exception:
+            return None
+        if not ts_code or not ts_code.endswith((".SH", ".SZ", ".BJ")):
+            return None
+        try:
+            china_now = self._get_china_now()
+            end_date = china_now.strftime("%Y%m%d")
+            start_date = (china_now - timedelta(days=lookback_days)).strftime("%Y%m%d")
+            df = self._call_api_with_rate_limit(
+                "moneyflow",
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as e:
+            logger.warning(f"[Tushare] moneyflow 获取个股资金流失败({stock_code}): {e}")
+            return None
+        if df is None or df.empty:
+            return None
+        try:
+            df = df.copy()
+            required = ("buy_lg_amount", "buy_elg_amount", "sell_lg_amount", "sell_elg_amount", "trade_date")
+            for col in required:
+                if col not in df.columns:
+                    return None
+            for col in ("buy_lg_amount", "buy_elg_amount", "sell_lg_amount", "sell_elg_amount"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            # 主力净流入（万元）= (大单买 + 特大单买) - (大单卖 + 特大单卖)
+            df["_main_net"] = (
+                df["buy_lg_amount"] + df["buy_elg_amount"]
+                - df["sell_lg_amount"] - df["sell_elg_amount"]
+            )
+            df = df.dropna(subset=["_main_net"])
+            if df.empty:
+                return None
+            df = df.sort_values("trade_date", ascending=False)  # 最新交易日在前
+            wan_to_yuan = 10000.0
+            return {
+                "main_net_inflow": float(df["_main_net"].iloc[0]) * wan_to_yuan,
+                "inflow_5d": float(df["_main_net"].head(5).sum()) * wan_to_yuan,
+                "inflow_10d": float(df["_main_net"].head(10).sum()) * wan_to_yuan,
+            }
+        except Exception as e:
+            logger.warning(f"[Tushare] moneyflow 解析个股资金流失败({stock_code}): {e}")
+            return None
+
+    def get_financial_fundamentals(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """用 Tushare income(利润表) + fina_indicator(财务指标) 取基本面，作为东财不可用时的兜底。
+
+        返回与 akshare 基本面一致的结构（A股，2000 积分可用，fail-open）：
+            {"growth": {revenue_yoy, net_profit_yoy, roe},
+             "earnings": {revenue, net_profit_parent, roe}}
+        - revenue_yoy: 营业收入同比增长率(%)（fina_indicator.or_yoy）
+        - net_profit_yoy: 归母净利润同比增长率(%)（fina_indicator.netprofit_yoy）
+        - roe: 净资产收益率(%)
+        - revenue: 营业收入（income.revenue，元）
+        - net_profit_parent: 归母净利润（income.n_income_attr_p，元）
+        """
+        from .realtime_types import safe_float
+
+        if self._api is None or _is_hk_market(stock_code):
+            return None
+        try:
+            ts_code = self._convert_stock_code(stock_code)
+        except Exception:
+            return None
+        if not ts_code or not ts_code.endswith((".SH", ".SZ", ".BJ")):
+            return None
+
+        china_now = self._get_china_now()
+        start_date = (china_now - timedelta(days=500)).strftime("%Y%m%d")
+        end_date = china_now.strftime("%Y%m%d")
+        growth: Dict[str, Any] = {}
+        earnings: Dict[str, Any] = {}
+
+        # 财务指标：ROE、净利润同比、营收同比
+        try:
+            ind = self._call_api_with_rate_limit(
+                "fina_indicator", ts_code=ts_code,
+                start_date=start_date, end_date=end_date,
+                fields="ts_code,end_date,roe,netprofit_yoy,or_yoy",
+            )
+            if ind is not None and not ind.empty:
+                r = ind.sort_values("end_date", ascending=False).iloc[0]
+                roe = safe_float(r.get("roe"))
+                growth = {
+                    "revenue_yoy": safe_float(r.get("or_yoy")),
+                    "net_profit_yoy": safe_float(r.get("netprofit_yoy")),
+                    "roe": roe,
+                }
+                if roe is not None:
+                    earnings["roe"] = roe
+        except Exception as e:
+            logger.debug(f"[Tushare] fina_indicator 取基本面失败 {stock_code}: {e}")
+
+        # 利润表：营业收入、归母净利润
+        try:
+            inc = self._call_api_with_rate_limit(
+                "income", ts_code=ts_code,
+                start_date=start_date, end_date=end_date,
+                fields="ts_code,end_date,revenue,total_revenue,n_income_attr_p",
+            )
+            if inc is not None and not inc.empty:
+                r = inc.sort_values("end_date", ascending=False).iloc[0]
+                earnings["revenue"] = safe_float(r.get("revenue")) or safe_float(r.get("total_revenue"))
+                earnings["net_profit_parent"] = safe_float(r.get("n_income_attr_p"))
+        except Exception as e:
+            logger.debug(f"[Tushare] income 取利润表失败 {stock_code}: {e}")
+
+        if not any(v is not None for v in growth.values()) and not earnings:
+            return None
+        return {"growth": growth, "earnings": earnings}
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据

@@ -606,6 +606,14 @@ def setup_env(override: bool = False):
         env_path = Path(__file__).parent.parent / '.env'
     load_dotenv(dotenv_path=env_path, override=override)
 
+    # 让 litellm 使用内置的本地价格表，跳过导入时联网拉取
+    # https://raw.githubusercontent.com/.../model_prices_and_context_window.json。
+    # 在受限/慢速网络下，该远程请求会阻塞 litellm 导入，进而导致 FastAPI 服务
+    # 在 30s 内无法完成启动（main.py: "FastAPI 服务在 30.0s 内未完成启动"）。
+    # 必须在任何 `import litellm` 之前设置；setup_env() 是两个入口（main.py /
+    # server.py）最早调用的初始化点，故在此设置。用 setdefault 保留用户显式覆盖。
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 
 @dataclass
 class Config:

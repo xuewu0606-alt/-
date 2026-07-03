@@ -598,6 +598,85 @@ class AnalyzerNewsPromptTestCase(unittest.TestCase):
         self.assertIn("事件催化存在但技术待确认", prompt)
         self.assertIn("已剔除与空头主判断直接冲突的看多结构理由", prompt)
 
+    def test_sanitize_trend_keeps_bullish_reasons_on_ma20_breakout_exception(self) -> None:
+        trend = {
+            "trend_status": "空头排列",
+            "ma_alignment": "空头排列 MA5<MA10<MA20",
+            "ma20": 28.08,
+            "current_price": 28.5,
+            "bias_ma20": 1.5,
+            "volume_ratio_5d": 1.8,
+            "volume_status": "放量上涨",
+            "signal_reasons": ["放量突破，事件催化", "多头排列，持续上涨"],
+            "risk_factors": ["下跌趋势未扭转"],
+        }
+
+        sanitized = _sanitize_trend_analysis_for_prompt(trend)
+
+        self.assertTrue(sanitized["ma20_breakout_exception"])
+        # 例外通道下不剔除看多结构理由
+        self.assertIn("多头排列，持续上涨", sanitized["signal_reasons"])
+        notes = "".join(sanitized["prompt_consistency_notes"])
+        self.assertIn("例外通道触发", notes)
+        self.assertIn("轻仓试仓", notes)
+        self.assertNotIn("严禁写成确定性买点", notes)
+
+    def test_sanitize_trend_no_exception_when_below_ma20(self) -> None:
+        trend = {
+            "trend_status": "空头排列",
+            "ma_alignment": "空头排列 MA5<MA10<MA20",
+            "ma20": 28.08,
+            "current_price": 26.3,
+            "bias_ma20": -6.3,
+            "volume_ratio_5d": 1.8,
+            "volume_status": "放量上涨",
+            "signal_reasons": ["多头排列，持续上涨"],
+            "risk_factors": [],
+        }
+
+        sanitized = _sanitize_trend_analysis_for_prompt(trend)
+
+        self.assertFalse(sanitized["ma20_breakout_exception"])
+        self.assertNotIn("多头排列，持续上涨", sanitized["signal_reasons"])
+        notes = "".join(sanitized["prompt_consistency_notes"])
+        self.assertIn("严禁写成确定性买点", notes)
+
+    def test_sanitize_trend_no_exception_without_volume_surge(self) -> None:
+        trend = {
+            "trend_status": "空头排列",
+            "ma_alignment": "空头排列 MA5<MA10<MA20",
+            "ma20": 28.08,
+            "current_price": 28.5,
+            "bias_ma20": 1.5,
+            "volume_ratio_5d": 0.9,
+            "volume_status": "缩量上涨",
+            "signal_reasons": ["多头排列，持续上涨"],
+            "risk_factors": [],
+        }
+
+        sanitized = _sanitize_trend_analysis_for_prompt(trend)
+
+        self.assertFalse(sanitized["ma20_breakout_exception"])
+        notes = "".join(sanitized["prompt_consistency_notes"])
+        self.assertIn("严禁写成确定性买点", notes)
+
+    def test_sanitize_trend_no_exception_on_anomalous_volume(self) -> None:
+        # 量比超过10倍属于异常数据，不能作为例外通道的放量依据
+        trend = {
+            "trend_status": "空头排列",
+            "ma_alignment": "空头排列 MA5<MA10<MA20",
+            "ma20": 28.08,
+            "current_price": 28.5,
+            "volume_ratio_5d": 15.0,
+            "volume_status": "量能正常",
+            "signal_reasons": [],
+            "risk_factors": [],
+        }
+
+        sanitized = _sanitize_trend_analysis_for_prompt(trend, volume_change_ratio=15.0)
+
+        self.assertFalse(sanitized["ma20_breakout_exception"])
+
     def test_sanitize_trend_analysis_for_prompt_returns_derived_copy_only(self) -> None:
         original = {
             "trend_status": "空头排列",

@@ -721,6 +721,55 @@ def _filter_conflicting_trend_items(items: List[str], conflict_hints: Tuple[str,
     return [item for item in items if not _contains_trend_hint(item, conflict_hints)]
 
 
+# 放量判定阈值：当日成交量达到5日均量的1.5倍视为放量
+_MA20_BREAKOUT_VOLUME_SURGE_RATIO = 1.5
+# 量比超过10倍视为异常数据，不作为例外通道的放量依据（与量能降权提示保持一致）
+_MA20_BREAKOUT_VOLUME_ANOMALY_RATIO = 10.0
+
+
+def _detect_ma20_breakout_exception(
+    trend_dict: Dict[str, Any],
+    *,
+    volume_change_ratio: Any = None,
+) -> bool:
+    """检测“放量站上MA20”例外通道的机械可验证条件。
+
+    仅验证客观数据（价格与MA20关系、量能放大）；“重大利好”属于语义判断，
+    交由 LLM 结合新闻上下文裁决。
+    """
+    ma20 = _safe_float(trend_dict.get("ma20"), default=math.nan)
+    price = _safe_float(trend_dict.get("current_price"), default=math.nan)
+    bias_ma20 = _safe_float(trend_dict.get("bias_ma20"), default=math.nan)
+
+    if math.isfinite(price) and math.isfinite(ma20) and ma20 > 0:
+        above_ma20 = price > ma20
+    elif math.isfinite(bias_ma20):
+        above_ma20 = bias_ma20 > 0
+    else:
+        above_ma20 = False
+    if not above_ma20:
+        return False
+
+    volume_ratio_5d = _safe_float(trend_dict.get("volume_ratio_5d"), default=math.nan)
+    volume_status = str(trend_dict.get("volume_status", ""))
+    parsed_volume_change = _safe_float(volume_change_ratio, default=math.nan)
+    return (
+        (
+            math.isfinite(volume_ratio_5d)
+            and _MA20_BREAKOUT_VOLUME_SURGE_RATIO
+            <= volume_ratio_5d
+            <= _MA20_BREAKOUT_VOLUME_ANOMALY_RATIO
+        )
+        or "放量上涨" in volume_status
+        or (
+            math.isfinite(parsed_volume_change)
+            and _MA20_BREAKOUT_VOLUME_SURGE_RATIO
+            <= parsed_volume_change
+            <= _MA20_BREAKOUT_VOLUME_ANOMALY_RATIO
+        )
+    )
+
+
 def _sanitize_trend_analysis_for_prompt(
     trend: Any,
     *,
@@ -734,16 +783,30 @@ def _sanitize_trend_analysis_for_prompt(
     trend_direction = _infer_trend_direction(trend_dict)
 
     if trend_direction == "bearish":
-        filtered_signal_reasons = _filter_conflicting_trend_items(
-            signal_reasons,
-            _BULLISH_TREND_HINTS + _WEAK_BULLISH_TREND_HINTS,
+        breakout_exception = _detect_ma20_breakout_exception(
+            trend_dict,
+            volume_change_ratio=volume_change_ratio,
         )
-        if len(filtered_signal_reasons) != len(signal_reasons):
-            prompt_notes.append("当前技术结构偏空，已剔除与空头主判断直接冲突的看多结构理由。")
-        signal_reasons = filtered_signal_reasons
-        prompt_notes.append(
-            "若新闻、业绩或政策催化偏多，只能表述为“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”，严禁写成确定性买点。"
-        )
+        trend_dict["ma20_breakout_exception"] = breakout_exception
+        if breakout_exception:
+            prompt_notes.append(
+                "例外通道触发：均线仍为空头排列，但当前价格已放量站上MA20（数据已核实）。"
+                "请核对消息面：若存在可核实的重大利好催化，允许将趋势判断上调为“震荡（反转观察）”，"
+                "操作建议可给出轻仓试仓（不超过2成仓），但必须写明确认条件（如连续2-3日收盘站稳MA20）"
+                "与失效条件（收盘跌回MA20下方即离场）；若无重大利好，仍按空头反弹处理，维持观望。"
+                "乖离率过高时不得立即追入，试仓买点应等待回踩确认。"
+            )
+        else:
+            filtered_signal_reasons = _filter_conflicting_trend_items(
+                signal_reasons,
+                _BULLISH_TREND_HINTS + _WEAK_BULLISH_TREND_HINTS,
+            )
+            if len(filtered_signal_reasons) != len(signal_reasons):
+                prompt_notes.append("当前技术结构偏空，已剔除与空头主判断直接冲突的看多结构理由。")
+            signal_reasons = filtered_signal_reasons
+            prompt_notes.append(
+                "若新闻、业绩或政策催化偏多，只能表述为“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”，严禁写成确定性买点。"
+            )
     elif trend_direction == "bullish":
         filtered_signal_reasons = _filter_conflicting_trend_items(
             signal_reasons,
@@ -1918,6 +1981,7 @@ class GeminiAnalyzer:
 - 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
 - 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
 - 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 例外通道：空头排列下，若“放量站上MA20 + 重大利好催化”同时成立，允许将趋势预测上调为“震荡（反转观察）”，操作建议可为轻仓试仓（不超过2成仓，`decision_type` 保持 `hold`），但必须列明确认条件（连续2-3日收盘站稳MA20）与失效止损（收盘跌回MA20下方离场）；缺任一条件仍按空头反弹处理，严禁直接给出重仓“买入/加仓”。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
 
@@ -2085,6 +2149,7 @@ class GeminiAnalyzer:
 - 股价位于支撑与压力之间、资金流不明确时，优先输出“持有/震荡/观望/洗盘观察”等可执行的中性建议；`decision_type` 仍保持 `hold`。
 - 只有在接近支撑确认或有效突破压力，且资金流/量价配合时，才能给出买入；接近压力且资金流出时不得追买。
 - 只有在跌破关键支撑、主力资金持续流出或风险显著放大时，才能给出卖出/减仓。
+- 例外通道：空头排列下，若“放量站上MA20 + 重大利好催化”同时成立，允许将趋势预测上调为“震荡（反转观察）”，操作建议可为轻仓试仓（不超过2成仓，`decision_type` 保持 `hold`），但必须列明确认条件（连续2-3日收盘站稳MA20）与失效止损（收盘跌回MA20下方离场）；缺任一条件仍按空头反弹处理，严禁直接给出重仓“买入/加仓”。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
 
@@ -3438,7 +3503,7 @@ class GeminiAnalyzer:
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
-- **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
+- **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”；唯一例外：数据核实“放量站上MA20”且消息面存在重大利好时，可判定为“震荡（反转观察）”并给出带确认条件与失效止损的轻仓试仓建议
  
 请输出完整的 JSON 格式决策仪表盘。"""
 
