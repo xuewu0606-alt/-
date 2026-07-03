@@ -591,16 +591,28 @@ def _can_reuse_market_context_for_review(summary: str, region: str) -> bool:
     return len(parts) <= 1
 
 
+def _resolve_daily_market_context_market(market: str, normalized_region: str) -> str:
+    if "," not in normalized_region:
+        return market
+    parts = [item.strip() for item in normalized_region.split(",") if item.strip()]
+    if parts and all(item in {"jp", "kr"} for item in parts):
+        return parts[0]
+    return market
+
+
 def _resolve_daily_market_context_target_date(
     region: str,
     current_time: datetime,
 ) -> date:
     normalized_region = str(region or "cn").strip().lower()
-    market = normalized_region if normalized_region in {"cn", "hk", "us"} else "cn"
+    market = normalized_region if normalized_region in {"cn", "hk", "us", "jp", "kr"} else "cn"
 
     from src.core.trading_calendar import get_effective_trading_date
 
-    return get_effective_trading_date(market, current_time=current_time)
+    return get_effective_trading_date(
+        _resolve_daily_market_context_market(market, normalized_region),
+        current_time=current_time,
+    )
 
 
 def _market_review_report_text(review_result: Any) -> str:
@@ -1042,9 +1054,18 @@ def start_api_server(host: str, port: int, config: Config) -> None:
         "log_level": level_name,
         "log_config": None,
     }
+    # Import the ASGI app object in the calling thread instead of handing uvicorn
+    # the "api.app:app" import string. With the string, uvicorn imports the app
+    # lazily inside the server thread, and that import (litellm + the full app
+    # tree, ~10s+ on constrained hosts) runs inside the startup probe window
+    # below, tripping the 3.0s timeout and causing a restart loop on slower
+    # machines. Importing first keeps the heavy work out of the probe window;
+    # genuine import failures still surface immediately to the caller.
+    from api.app import app as fastapi_app
+
     try:
         uvicorn_config = uvicorn.Config(
-            "api.app:app",
+            fastapi_app,
             install_signal_handlers=False,
             **uvicorn_kwargs,
         )
@@ -1054,7 +1075,7 @@ def start_api_server(host: str, port: int, config: Config) -> None:
         # when it's a boolean flag.
         use_config_signal_handlers = False
         uvicorn_config = uvicorn.Config(
-            "api.app:app",
+            fastapi_app,
             **uvicorn_kwargs,
         )
     uvicorn_server = uvicorn.Server(config=uvicorn_config)

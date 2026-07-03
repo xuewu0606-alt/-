@@ -33,6 +33,57 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_market_review_region_accepts_comma_separated_supported_values(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "MARKET_REVIEW_REGION": "cn,us,jp",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.market_review_region, "cn,us,jp")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_market_review_region_filters_invalid_values_in_comma_subset(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "MARKET_REVIEW_REGION": "cn,eu,us,kr,xx",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.market_review_region, "cn,us,kr")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_market_review_region_falls_back_to_cn_when_no_supported_tokens(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "MARKET_REVIEW_REGION": "eu,apac",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.market_review_region, "cn")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_load_from_env_keeps_default_behavior_without_tickflow_api_key(
         self, _mock_parse_litellm_yaml, _mock_setup_env
     ):
@@ -50,6 +101,120 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             config.realtime_source_priority,
             "tencent,akshare_sina,efinance,akshare_em",
         )
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_generation_backend_env_defaults_to_litellm_contract(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(os.environ, {"STOCK_LIST": "600519"}, clear=True):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.generation_backend, "litellm")
+        self.assertEqual(config.generation_fallback_backend, "litellm")
+        self.assertEqual(config.agent_generation_backend, "auto")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_generation_backend_env_accepts_phase2_values(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "GENERATION_BACKEND": " codex_CLI ",
+                "GENERATION_FALLBACK_BACKEND": "",
+                "GENERATION_BACKEND_TIMEOUT_SECONDS": "300",
+                "GENERATION_BACKEND_MAX_OUTPUT_BYTES": "1048576",
+                "GENERATION_BACKEND_MAX_CONCURRENCY": "2",
+                "LOCAL_CLI_BACKEND_MAX_CONCURRENCY": "1",
+                "AGENT_GENERATION_BACKEND": " codex_cli ",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.generation_backend, "codex_cli")
+        self.assertEqual(config.generation_fallback_backend, "")
+        self.assertEqual(config.generation_backend_timeout_seconds, 300)
+        self.assertEqual(config.generation_backend_max_output_bytes, 1048576)
+        self.assertEqual(config.generation_backend_max_concurrency, 2)
+        self.assertEqual(config.local_cli_backend_max_concurrency, 1)
+        self.assertEqual(config.agent_generation_backend, "codex_cli")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_generation_backend_env_clamps_phase2_numeric_maxima(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "GENERATION_BACKEND_TIMEOUT_SECONDS": "999999",
+                "GENERATION_BACKEND_MAX_OUTPUT_BYTES": "999999999",
+                "GENERATION_BACKEND_MAX_CONCURRENCY": "999",
+                "LOCAL_CLI_BACKEND_MAX_CONCURRENCY": "999",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.generation_backend_timeout_seconds, 3600)
+        self.assertEqual(config.generation_backend_max_output_bytes, 33554432)
+        self.assertEqual(config.generation_backend_max_concurrency, 16)
+        self.assertEqual(config.local_cli_backend_max_concurrency, 4)
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_prompt_cache_config_defaults_are_safe(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(os.environ, {"STOCK_LIST": "600519"}, clear=True):
+            config = Config._load_from_env()
+
+        self.assertTrue(config.llm_prompt_cache_telemetry_enabled)
+        self.assertFalse(config.llm_prompt_cache_hints_enabled)
+        self.assertEqual(config.llm_prompt_cache_diagnostics_level, "off")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_prompt_cache_config_parses_env_values(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "LLM_PROMPT_CACHE_TELEMETRY_ENABLED": "false",
+                "LLM_PROMPT_CACHE_HINTS_ENABLED": "true",
+                "LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL": " DEBUG ",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertFalse(config.llm_prompt_cache_telemetry_enabled)
+        self.assertTrue(config.llm_prompt_cache_hints_enabled)
+        self.assertEqual(config.llm_prompt_cache_diagnostics_level, "debug")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_prompt_cache_invalid_diagnostics_level_falls_back_to_off(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL": "verbose",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.llm_prompt_cache_diagnostics_level, "off")
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
@@ -147,6 +312,38 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         self.assertEqual(with_news_intel.news_intel_max_items_per_source, 25)
         self.assertEqual(with_news_intel.news_intel_retention_days, 45)
         self.assertEqual(with_news_intel.newsnow_base_url, "https://newsnow.example.com")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_market_review_region_updates_do_not_change_llm_provider_model_contract(
+        self,
+        _mock_parse_litellm_yaml,
+        _mock_setup_env,
+    ) -> None:
+        base_env = {
+            "STOCK_LIST": "600519",
+            "MARKET_REVIEW_REGION": "cn",
+            "LITELLM_MODEL": "openai/gpt-4.1",
+            "OPENAI_MODEL": "gpt-4.1",
+            "OPENAI_BASE_URL": "https://openai.example.com/v1",
+            "OPENAI_API_KEY": "base-key-12345",
+            "LITELLM_FALLBACK_MODELS": "openai/gpt-5.5,openai/gpt-4o-mini",
+            "VISION_MODEL": "openai/gpt-4o-mini",
+        }
+        with patch.dict(os.environ, base_env, clear=True):
+            baseline = Config._load_from_env()
+
+        with_jpkr_env = dict(base_env)
+        with_jpkr_env["MARKET_REVIEW_REGION"] = "both"
+        with patch.dict(os.environ, with_jpkr_env, clear=True):
+            with_jpkr = Config._load_from_env()
+
+        self.assertEqual(with_jpkr.litellm_model, baseline.litellm_model)
+        self.assertEqual(with_jpkr.litellm_fallback_models, baseline.litellm_fallback_models)
+        self.assertEqual(with_jpkr.vision_model, baseline.vision_model)
+        self.assertEqual(with_jpkr.openai_model, baseline.openai_model)
+        self.assertEqual(with_jpkr.openai_api_key, baseline.openai_api_key)
+        self.assertEqual(with_jpkr.openai_base_url, baseline.openai_base_url)
 
     def test_env_example_alphasift_install_spec_matches_trusted_default(self):
         env_example = Path(__file__).resolve().parents[1] / ".env.example"
@@ -561,6 +758,97 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
         self.assertEqual(config.stock_list, ["600519", "000001"])
 
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_custom_webhook_template_unescapes_compose_saved_placeholders(
+        self,
+        _mock_parse_yaml,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                'CUSTOM_WEBHOOK_BODY_TEMPLATE={"title":$$title_json,"content":$$content_json}\n',
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ENV_FILE": str(env_path),
+                    "CUSTOM_WEBHOOK_BODY_TEMPLATE": '{"title":$$title_json,"content":$$content_json}',
+                },
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertEqual(
+            config.custom_webhook_body_template,
+            '{"title":$title_json,"content":$content_json}',
+        )
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_custom_webhook_template_unescapes_compose_saved_braced_placeholders(
+        self,
+        _mock_parse_yaml,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                'CUSTOM_WEBHOOK_BODY_TEMPLATE={"content":$${content_json}}\n',
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"ENV_FILE": str(env_path)},
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertEqual(
+            config.custom_webhook_body_template,
+            '{"content":${content_json}}',
+        )
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_custom_webhook_template_does_not_affect_llm_contract(
+        self,
+        _mock_parse_litellm_yaml: object,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "STOCK_LIST=600519",
+                        "LITELLM_MODEL=openai/gpt-5.5",
+                        "OPENAI_MODEL=gpt-5.5",
+                        "OPENAI_API_KEY=runtime-openai-key",
+                        "OPENAI_BASE_URL=https://openai.example/v1",
+                        "CUSTOM_WEBHOOK_BODY_TEMPLATE={\"title\":$$title_json,\"content\":$$content_json}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ENV_FILE": str(env_path),
+                },
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
+        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.openai_api_key, "runtime-openai-key")
+        self.assertEqual(config.openai_base_url, "https://openai.example/v1")
+        self.assertEqual(
+            config.custom_webhook_body_template,
+            '{"title":$title_json,"content":$content_json}',
+        )
+
     def test_refresh_stock_list_preserves_empty_required_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"
@@ -581,6 +869,22 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             parsed = Config._parse_report_language("zh-cn")
 
         self.assertEqual(parsed, "zh")
+
+    def test_parse_market_review_region_accepts_jp_kr_values_and_comma_lists(self) -> None:
+        self.assertEqual(Config._parse_market_review_region("jp"), "jp")
+        self.assertEqual(Config._parse_market_review_region("KR"), "kr")
+        self.assertEqual(
+            Config._parse_market_review_region("kr,jp,us"),
+            "us,jp,kr",
+        )
+        self.assertEqual(
+            Config._parse_market_review_region("cn,eu,us"),
+            "cn,us",
+        )
+        self.assertEqual(
+            Config._parse_market_review_region("both"),
+            "cn,hk,us,jp,kr",
+        )
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

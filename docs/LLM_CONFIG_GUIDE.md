@@ -25,6 +25,39 @@
 
 ---
 
+## Generation Backend（Phase 2）
+
+Generation backend 是普通分析、大盘复盘和 `generate_text()` 的外层运行时选择。默认仍是 `litellm`，零配置路径与历史行为保持一致；`codex_cli` 是显式 opt-in 的本地 CLI backend，当前标记为 **experimental/limited**。
+
+```env
+GENERATION_BACKEND=litellm
+GENERATION_FALLBACK_BACKEND=litellm
+GENERATION_BACKEND_TIMEOUT_SECONDS=300
+GENERATION_BACKEND_MAX_OUTPUT_BYTES=1048576
+GENERATION_BACKEND_MAX_CONCURRENCY=1
+LOCAL_CLI_BACKEND_MAX_CONCURRENCY=1
+AGENT_GENERATION_BACKEND=auto
+```
+
+- `GENERATION_BACKEND=litellm|codex_cli`。`codex_cli` 是 generation backend，不是 LiteLLM provider；不要写 `LITELLM_MODEL=codex_cli/...`。
+- `GENERATION_FALLBACK_BACKEND` 未配置时默认 `litellm`；本地 `.env` 显式空值 `GENERATION_FALLBACK_BACKEND=` 表示禁用 backend-level fallback；primary 与 fallback 相同时解析为 no-op。仓库自带 GitHub Actions workflow 未配置该变量时会显式导出 `litellm`，如果要在 Actions 中禁用 backend fallback，请把 fallback 设为 primary backend，例如 `GENERATION_BACKEND=codex_cli` + `GENERATION_FALLBACK_BACKEND=codex_cli`。
+- `GENERATION_BACKEND=codex_cli` 且没有 Gemini/OpenAI/Anthropic/DeepSeek API Key 时，普通分析和大盘复盘仍会尝试本地 CLI backend；如果 `codex` executable 不存在，会返回结构化 `command_not_found`，不会报“API Key 未配置”。
+- 当前 `codex_cli` preset 使用 `codex exec --output-last-message <temp-file> -` 读取最终响应；Codex CLI 仍会把同一最终响应打印到 stdout，DSA 会从 stdout 诊断预览和输出大小统计中剔除这份重复内容，不参与主分析 JSON 解析。官方依据见 [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive) 与 [Codex CLI command line options](https://developers.openai.com/codex/cli/reference)。本仓库当前只验证 `codex-cli 0.142.0`，不声明更宽最低版本；如果 CLI 版本不支持 preset 参数，DSA 会返回结构化 `non_zero_exit` / `cli_contract_unsupported` 诊断，并在配置 backend fallback 时回退到 `litellm`。
+- `codex_cli` 不支持 streaming。请求 stream 时会自动降级为 non-stream，不会因此返回 `capability_unsupported`。
+- 本地 CLI usage 通常不可用，系统不会写入 fake 0 token、fake cost 或 fake cache telemetry。
+- 本地 CLI 执行上限有硬边界：`GENERATION_BACKEND_TIMEOUT_SECONDS` 最大 `3600`，`GENERATION_BACKEND_MAX_OUTPUT_BYTES` 最大 `33554432`，`GENERATION_BACKEND_MAX_CONCURRENCY` 最大 `16`，`LOCAL_CLI_BACKEND_MAX_CONCURRENCY` 最大 `4`。诊断 stdout/stderr 与最终响应合计超过输出上限时会返回结构化 `output_too_large`；对 `--output-last-message` preset，stdout 中重复打印的最终响应不会重复计入，也不会作为 `stdout_preview` 暴露。
+- 本地 CLI 默认并发为 1；有效并发为 `min(LOCAL_CLI_BACKEND_MAX_CONCURRENCY, GENERATION_BACKEND_MAX_CONCURRENCY)`，不继承 `MAX_WORKERS`。
+- `AGENT_GENERATION_BACKEND=auto` 不会无条件继承 `GENERATION_BACKEND=codex_cli`；Agent 工具调用继续使用 LiteLLM。Web 设置页仅暴露 `auto|litellm`；手写 `AGENT_GENERATION_BACKEND=codex_cli` 在 Phase 2 不实现 text-only Agent mode，会返回明确 unsupported tool-calling 诊断。
+
+### Codex CLI 本地 backend 隐私与边界
+
+- 本地 CLI Backend 不等于离线模型；Codex CLI 背后的服务可能处理股票代码、新闻、持仓上下文、分析 prompt、报告草稿等内容。
+- Docker、云服务器、CI 不天然拥有你本机的 CLI 登录态。
+- GitHub Actions 只负责透传配置值，不安装或登录 Codex CLI；如果在 Actions 中 opt-in `GENERATION_BACKEND=codex_cli`，runner 上缺少可执行文件或登录态时应看到结构化失败。
+- DSA 不读取 Codex credential 文件，但子进程可能读取 CLI 自身登录态。
+- Web 设置页只暴露安全 preset，不允许提交任意 command / argv / shell string。
+- `codex_cli` 仍标记为 experimental/limited；如果你的 CLI 版本不支持稳定的 `--output-last-message` 非交互输出，请保持 `GENERATION_BACKEND=litellm`。
+
 ## 方式一：极简单模型配置（适合新手）
 
 **目标：** 只要记得填入 API Key 和对应的模型名就能立刻用。不需要折腾复杂概念。
@@ -185,6 +218,18 @@ LLM_OLLAMA_MODELS=qwen3:8b,llama3.2
 LITELLM_MODEL=ollama/qwen3:8b
 ```
 
+### 示例：Hermes 本地 HTTP Generation（Phase 3）
+```env
+LLM_CHANNELS=hermes
+LLM_HERMES_PROTOCOL=openai
+LLM_HERMES_BASE_URL=http://127.0.0.1:8642/v1
+LLM_HERMES_API_KEY=sk-local-hermes
+LLM_HERMES_MODELS=hermes-agent
+LITELLM_MODEL=openai/hermes-agent
+```
+
+Hermes 是保留渠道名，只支持本机 loopback `/v1` OpenAI-compatible generation。Phase 3 只验证普通分析与 JSON 输出；不支持 Stream/SSE、Tools、Vision、Agent tools、远程 Hermes 或进程生命周期管理。Hermes API Key 只能使用单个 `LLM_HERMES_API_KEY`，不要配置 `LLM_HERMES_API_KEYS` 或 `LLM_HERMES_EXTRA_HEADERS`。如果 Hermes 配置非法，系统会阻止 legacy provider silent fallback，避免错误地改用外部模型。Web 设置页保存 reserved Hermes 渠道时，会显式清空旧的 `LLM_HERMES_API_KEYS` / `LLM_HERMES_EXTRA_HEADERS` 并返回 warning；如需恢复旧值，请从 `.env` 备份、Git 历史或桌面端导出备份手动还原，但 Phase 3 仍会拒绝非空的多 Key / Extra Headers 配置。
+
 ### MiniMax 渠道模型填写说明
 
 - 如果你通过 OpenAI Compatible 渠道接 MiniMax，请在渠道模型里直接填写 `minimax/<模型名>`，例如 `minimax/MiniMax-M1`。
@@ -284,6 +329,22 @@ LLM_USAGE_HMAC_KEY_VERSION=local-v1
 - 轮换密钥时同步更新 `LLM_USAGE_HMAC_KEY_VERSION`，避免不同密钥生成的 HMAC 被误比较。
 - 不要复用登录 session secret，也不要把真实密钥提交到版本控制或暴露在 issue、日志、截图中。
 
+### Provider prompt cache 配置（P1 / P1.5）
+
+Prompt cache 配置只控制本项目是否记录 cache usage / diagnostics，以及主分析路径是否主动发送已验证的 provider-specific hint；它不控制 OpenAI、Gemini、DeepSeek 等 provider 的 implicit / provider-managed cache。
+
+```env
+LLM_PROMPT_CACHE_TELEMETRY_ENABLED=true
+LLM_PROMPT_CACHE_HINTS_ENABLED=false
+LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL=off
+```
+
+- `LLM_PROMPT_CACHE_TELEMETRY_ENABLED=false` 时，不持久化 provider raw usage JSON、normalized cache fields 和 cache decision diagnostics；基础 token usage 记录保持兼容。
+- `LLM_PROMPT_CACHE_HINTS_ENABLED=true` 只允许主分析 / analyzer LiteLLM 路径向 registry 中已验证或 smoke-tested 的 provider / route 发送 `prompt_cache_key`、`cache_control`、`user_id` 等 hint。问股 Agent 路径当前只记录 capability / usage diagnostics，不主动发送 provider-specific hints。未知 OpenAI-compatible gateway 默认 telemetry only。
+- `LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL=basic` 只在 debug 日志和测试可观察对象中提供 provider、api surface、verification status、hint applied / disabled reason 等非敏感枚举。`debug` 在同一范围内额外提供 HMAC-derived route/cache diagnostics 和 matched caps id，但仍禁止 raw prompt、request body、message content、股票/用户原文、webhook 或 API key；这些诊断不是公开 Usage API 或普通设置页输出。
+- Provider Cache Capability Registry 是 `src/llm/provider_cache.py` 中的 code-level 手工能力表。条目带 `doc_sources`、`last_verified_at` 和 `verification_status`；新增 provider 或升级 LiteLLM 后应同步更新条目与测试。
+- Prompt cache key、route key 和 DeepSeek session isolation 复用 `LLM_USAGE_HMAC_SECRET` / `.llm_usage_hmac_secret` 做 domain-separated HMAC，不新增 prompt-cache 专用 secret。
+
 ### Legacy message stability audit（P0.5a）
 
 P0.5a 在普通个股分析路径为 legacy `[system, user]` message 追加内部稳定性审计字段，继续写入本地 `llm_usage`。它复用上面的 message HMAC，不修改 prompt 内容、message 顺序、provider 请求参数、cache hint、模型输出、fallback 顺序，也不扩展公开 Usage API 或 Web 页面。
@@ -348,7 +409,7 @@ model_list:
 
 渠道模式无需上传 YAML 文件。仓库自带 `00-daily-analysis.yml` 已显式透传以下常用字段：
 
-- 运行时选择：`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`
+- 运行时选择：`GENERATION_BACKEND`、`GENERATION_FALLBACK_BACKEND`、`GENERATION_BACKEND_TIMEOUT_SECONDS`、`GENERATION_BACKEND_MAX_OUTPUT_BYTES`、`GENERATION_BACKEND_MAX_CONCURRENCY`、`LOCAL_CLI_BACKEND_MAX_CONCURRENCY`、`AGENT_GENERATION_BACKEND`、`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`、`LLM_PROMPT_CACHE_TELEMETRY_ENABLED`、`LLM_PROMPT_CACHE_HINTS_ENABLED`、`LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - 多 Key：`GEMINI_API_KEYS`、`ANTHROPIC_API_KEYS`、`OPENAI_API_KEYS`、`DEEPSEEK_API_KEYS`（当前 workflow 仅从 repository secrets 导入，不会读取同名 Variables）
 - 常用渠道名：`primary`、`secondary`、`aihubmix`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`gemini`、`anthropic`、`openai`、`ollama`
 

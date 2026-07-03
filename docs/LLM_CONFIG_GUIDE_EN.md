@@ -18,6 +18,39 @@ If you are choosing a concrete provider, setting up GitHub Actions Secrets / Var
 
 ---
 
+## Generation Backend (Phase 2)
+
+The generation backend is the outer runtime selector for regular stock analysis, market review, and `generate_text()`. The default remains `litellm` with zero regression. `codex_cli` is an explicit opt-in local CLI backend and is currently **experimental/limited**.
+
+```env
+GENERATION_BACKEND=litellm
+GENERATION_FALLBACK_BACKEND=litellm
+GENERATION_BACKEND_TIMEOUT_SECONDS=300
+GENERATION_BACKEND_MAX_OUTPUT_BYTES=1048576
+GENERATION_BACKEND_MAX_CONCURRENCY=1
+LOCAL_CLI_BACKEND_MAX_CONCURRENCY=1
+AGENT_GENERATION_BACKEND=auto
+```
+
+- `GENERATION_BACKEND=litellm|codex_cli`. `codex_cli` is a generation backend, not a LiteLLM provider; do not set `LITELLM_MODEL=codex_cli/...`.
+- If `GENERATION_FALLBACK_BACKEND` is unset, it defaults to `litellm`. In local `.env`, an explicit empty value disables backend-level fallback. A fallback equal to the primary backend is treated as no-op. The bundled GitHub Actions workflow explicitly exports `litellm` when this variable is not configured; to disable backend fallback there, set the fallback to the primary backend, for example `GENERATION_BACKEND=codex_cli` + `GENERATION_FALLBACK_BACKEND=codex_cli`.
+- With `GENERATION_BACKEND=codex_cli`, regular analysis and market review do not require Gemini/OpenAI/Anthropic/DeepSeek API keys. If the `codex` executable is missing, DSA returns structured `command_not_found` instead of “API key not configured”.
+- The current `codex_cli` preset reads the final response through `codex exec --output-last-message <temp-file> -`. Codex CLI still prints the same final response to stdout; DSA removes that duplicate from stdout diagnostics previews and output-size accounting, and never uses stdout for main-analysis JSON parsing. Official references: [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive) and [Codex CLI command line options](https://developers.openai.com/codex/cli/reference). This repository currently verifies only `codex-cli 0.142.0` and does not claim a wider minimum version range; if the installed CLI does not support a preset argument, DSA returns structured `non_zero_exit` / `cli_contract_unsupported` diagnostics and falls back to `litellm` when backend fallback is configured.
+- `codex_cli` does not support streaming. Stream requests degrade to non-stream and do not return `capability_unsupported`.
+- Local CLI usage is normally unavailable. DSA does not persist fake 0-token, fake cost, or fake cache telemetry.
+- Local CLI execution has hard caps: `GENERATION_BACKEND_TIMEOUT_SECONDS` max `3600`, `GENERATION_BACKEND_MAX_OUTPUT_BYTES` max `33554432`, `GENERATION_BACKEND_MAX_CONCURRENCY` max `16`, and `LOCAL_CLI_BACKEND_MAX_CONCURRENCY` max `4`. Diagnostic stdout/stderr plus the final response are counted together; for `--output-last-message` presets, the final response duplicated to stdout is not counted twice and is not exposed in `stdout_preview`.
+- Local CLI default concurrency is 1. Effective local CLI concurrency is `min(LOCAL_CLI_BACKEND_MAX_CONCURRENCY, GENERATION_BACKEND_MAX_CONCURRENCY)` and does not inherit `MAX_WORKERS`.
+- `AGENT_GENERATION_BACKEND=auto` does not blindly inherit `GENERATION_BACKEND=codex_cli`; Agent tool calling remains on LiteLLM. The Web settings page only exposes `auto|litellm`; a hand-written `AGENT_GENERATION_BACKEND=codex_cli` does not enable Agent text-only mode in Phase 2 and returns an explicit unsupported tool-calling diagnostic.
+
+### Codex CLI Privacy And Boundaries
+
+- A local CLI backend is not an offline model. The service behind Codex CLI may process stock symbols, news, position context, analysis prompts, and report drafts.
+- Docker, cloud servers, and CI do not automatically have your local CLI login state.
+- GitHub Actions only passes configuration values through; it does not install or log in Codex CLI. If you opt into `GENERATION_BACKEND=codex_cli` in Actions, a runner without the executable or login state should return a structured failure.
+- DSA does not read Codex credential files, but the subprocess may use the CLI's own login state.
+- The Web settings page only exposes safe presets; it does not accept arbitrary command, argv, or shell strings.
+- `codex_cli` remains experimental/limited. If your CLI version does not support stable non-interactive `--output-last-message` output, keep `GENERATION_BACKEND=litellm`.
+
 ## Method 1: Simple Model Config (For Beginners)
 
 **Goal:** Just paste your API Key and the model name to start using it immediately. No need to mess with complex concepts.
@@ -178,6 +211,18 @@ LLM_OLLAMA_MODELS=qwen3:8b,llama3.2
 LITELLM_MODEL=ollama/qwen3:8b
 ```
 
+### Example: Hermes Local HTTP Generation (Phase 3)
+```env
+LLM_CHANNELS=hermes
+LLM_HERMES_PROTOCOL=openai
+LLM_HERMES_BASE_URL=http://127.0.0.1:8642/v1
+LLM_HERMES_API_KEY=sk-local-hermes
+LLM_HERMES_MODELS=hermes-agent
+LITELLM_MODEL=openai/hermes-agent
+```
+
+`hermes` is a reserved channel name for local loopback `/v1` OpenAI-compatible generation. Phase 3 only verifies regular analysis and JSON output. It does not support Stream/SSE, tools, Vision, Agent tools, remote Hermes, or process lifecycle management. Use exactly one `LLM_HERMES_API_KEY`; do not configure `LLM_HERMES_API_KEYS` or `LLM_HERMES_EXTRA_HEADERS`. If enabled Hermes config is invalid, DSA blocks legacy provider silent fallback so requests do not unexpectedly switch to an external model. When the Web settings page saves the reserved Hermes channel, it explicitly clears stale `LLM_HERMES_API_KEYS` / `LLM_HERMES_EXTRA_HEADERS` values and returns a warning. To recover previous values, restore them from a `.env` backup, Git history, or a desktop export backup, but Phase 3 will still reject non-empty multi-key or extra-header Hermes settings.
+
 ### MiniMax Model Naming in Channel Mode
 
 - If you access MiniMax through an OpenAI-compatible channel, enter the model as `minimax/<model-name>` in the channel model list, for example `minimax/MiniMax-M1`.
@@ -283,6 +328,22 @@ LLM_USAGE_HMAC_KEY_VERSION=local-v1
 - When rotating the secret, update `LLM_USAGE_HMAC_KEY_VERSION` so old and new fingerprints are not compared as if they used the same key.
 - Do not reuse the login session secret and do not commit or expose the real secret in version control, issues, logs, or screenshots.
 
+### Provider prompt cache configuration (P1 / P1.5)
+
+Prompt-cache settings only control whether this project records cache usage / diagnostics and whether the main analysis path actively sends verified provider-specific hints. They do not control implicit or provider-managed cache behavior in OpenAI, Gemini, DeepSeek, or other providers.
+
+```env
+LLM_PROMPT_CACHE_TELEMETRY_ENABLED=true
+LLM_PROMPT_CACHE_HINTS_ENABLED=false
+LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL=off
+```
+
+- When `LLM_PROMPT_CACHE_TELEMETRY_ENABLED=false`, provider raw usage JSON, normalized cache fields, and cache-decision diagnostics are not persisted. Basic token usage remains compatible.
+- `LLM_PROMPT_CACHE_HINTS_ENABLED=true` only allows the main analysis / analyzer LiteLLM path to send `prompt_cache_key`, `cache_control`, `user_id`, and similar hints for provider / route entries that are verified or smoke-tested in the registry. The ask-stock Agent path currently records capability / usage diagnostics only and does not actively send provider-specific hints. Unknown OpenAI-compatible gateways stay telemetry-only.
+- `LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL=basic` provides non-sensitive enum decisions such as provider, API surface, verification status, hint applied, and disabled reason only through debug logs and test-observable objects. `debug` adds HMAC-derived route/cache diagnostics and matched caps id on the same surfaces, but still must not include raw prompts, request bodies, message content, raw stock/user values, webhooks, or API keys. These diagnostics are not public Usage API or ordinary settings-page output.
+- The Provider Cache Capability Registry is a code-level manual registry in `src/llm/provider_cache.py`. Entries include `doc_sources`, `last_verified_at`, and `verification_status`; update them with tests when adding providers or upgrading LiteLLM.
+- Prompt cache keys, route keys, and DeepSeek session isolation reuse `LLM_USAGE_HMAC_SECRET` / `.llm_usage_hmac_secret` with domain-separated HMACs. No prompt-cache-specific secret is introduced.
+
 ### Legacy message stability audit (P0.5a)
 
 P0.5a adds internal stability-audit fields for the ordinary stock-analysis legacy `[system, user]` message path. The fields are written only to local `llm_usage` records. They reuse the message HMAC pipeline above and do not change prompt text, message order, provider request parameters, cache hints, model output, fallback order, the public Usage API, or Web pages.
@@ -302,7 +363,7 @@ P0.5a does not introduce PromptBlock IR, `block_id`, `stability_class`, `static_
 
 The bundled `00-daily-analysis.yml` explicitly passes the common LLM runtime fields to the job environment:
 
-- Runtime selection: `LLM_CHANNELS`, `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `AGENT_LITELLM_MODEL`, `VISION_MODEL`, `VISION_PROVIDER_PRIORITY`, `LLM_TEMPERATURE`, `LLM_USAGE_HMAC_SECRET`, `LLM_USAGE_HMAC_KEY_VERSION`
+- Runtime selection: `GENERATION_BACKEND`, `GENERATION_FALLBACK_BACKEND`, `GENERATION_BACKEND_TIMEOUT_SECONDS`, `GENERATION_BACKEND_MAX_OUTPUT_BYTES`, `GENERATION_BACKEND_MAX_CONCURRENCY`, `LOCAL_CLI_BACKEND_MAX_CONCURRENCY`, `AGENT_GENERATION_BACKEND`, `LLM_CHANNELS`, `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `AGENT_LITELLM_MODEL`, `VISION_MODEL`, `VISION_PROVIDER_PRIORITY`, `LLM_TEMPERATURE`, `LLM_USAGE_HMAC_SECRET`, `LLM_USAGE_HMAC_KEY_VERSION`, `LLM_PROMPT_CACHE_TELEMETRY_ENABLED`, `LLM_PROMPT_CACHE_HINTS_ENABLED`, `LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - Multiple keys: `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `DEEPSEEK_API_KEYS` (the current workflow imports these from repository Secrets only, not from same-named Variables)
 - Common channel names: `primary`, `secondary`, `aihubmix`, `deepseek`, `dashscope`, `zhipu`, `moonshot`, `minimax`, `volcengine`, `siliconflow`, `openrouter`, `gemini`, `anthropic`, `openai`, `ollama`
 

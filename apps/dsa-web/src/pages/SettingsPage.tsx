@@ -1,9 +1,10 @@
 import type React from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clock, Play, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { CheckCircle2, ChevronDown, CircleAlert, CircleDashed, Clock, Play, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useAuth, useSystemConfig } from '../hooks';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { createParsedApiError, getParsedApiError, type ParsedApiError } from '../api/error';
+import { analysisApi } from '../api/analysis';
 import { alphasiftApi, notifyAlphaSiftConfigChanged, notifySystemConfigChanged } from '../api/alphasift';
 import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, ConfirmDialog, EmptyState } from '../components/common';
@@ -25,6 +26,8 @@ import { getCategoryDescription } from '../utils/systemConfigI18n';
 import type {
   ConfigValidationIssue,
   SchedulerStatusResponse,
+  SetupStatusCheck,
+  SetupStatusResponse,
   SystemConfigCategory,
   SystemConfigItem,
   SystemConfigUpdateItem,
@@ -81,6 +84,16 @@ type DesktopUpdateNotice = {
   actionLabel?: string;
   actionKind?: 'release' | 'install';
 };
+
+const PROMPT_CACHE_ADVANCED_SETTING_KEYS = new Set([
+  'LLM_PROMPT_CACHE_TELEMETRY_ENABLED',
+  'LLM_PROMPT_CACHE_HINTS_ENABLED',
+  'LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL',
+]);
+
+function isPromptCacheAdvancedSetting(item: { key: string }) {
+  return PROMPT_CACHE_ADVANCED_SETTING_KEYS.has(item.key);
+}
 
 function trimDesktopRuntimeString(value: unknown) {
   return typeof value === 'string' ? value.trim() : '';
@@ -229,9 +242,211 @@ function getConfigItem(items: SystemConfigItem[], key: string) {
   return items.find((item) => item.key === key);
 }
 
+function parseSetupStockList(value: unknown) {
+  return String(value ?? '')
+    .split(/[,\n\r;，、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function isEnabledConfigValue(value: unknown) {
   return String(value ?? '').trim().toLowerCase() === 'true';
 }
+
+function getSetupCheckIcon(check: SetupStatusCheck) {
+  if (check.status === 'configured' || check.status === 'inherited') {
+    return <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />;
+  }
+  if (check.status === 'needs_action') {
+    return <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-warning" aria-hidden="true" />;
+  }
+  return <CircleDashed className="mt-0.5 h-4 w-4 shrink-0 text-muted-text" aria-hidden="true" />;
+}
+
+function getSetupCheckStatusLabel(
+  check: SetupStatusCheck,
+  t: (key: UiTextKey, params?: Record<string, string | number>) => string,
+) {
+  if (check.status === 'configured') return t('settings.setupStatusConfigured');
+  if (check.status === 'inherited') return t('settings.setupStatusInherited');
+  if (check.status === 'needs_action') return t('settings.setupStatusNeedsAction');
+  return t('settings.setupStatusOptional');
+}
+
+type FirstRunSetupCardProps = {
+  status: SetupStatusResponse | null;
+  isLoading: boolean;
+  error: ParsedApiError | null;
+  firstStockCode: string;
+  isSaving: boolean;
+  isRunningSmoke: boolean;
+  smokeError: ParsedApiError | null;
+  smokeSuccess: string;
+  onRefresh: () => void | Promise<void>;
+  onSelectCategory: (category: SystemConfigCategory) => void;
+  onRunSmoke: () => void | Promise<void>;
+  listSeparator: string;
+  t: (key: UiTextKey, params?: Record<string, string | number>) => string;
+};
+
+const FirstRunSetupCard: React.FC<FirstRunSetupCardProps> = ({
+  status,
+  isLoading,
+  error,
+  firstStockCode,
+  isSaving,
+  isRunningSmoke,
+  smokeError,
+  smokeSuccess,
+  onRefresh,
+  onSelectCategory,
+  onRunSmoke,
+  listSeparator,
+  t,
+}) => {
+  const [isHidden, setIsHidden] = useState(false);
+  const requiredMissing = status?.checks.filter((check) => check.required && check.status === 'needs_action') || [];
+  const isComplete = Boolean(status?.isComplete);
+  const canRunSmoke = Boolean(status?.readyForSmoke && firstStockCode);
+  const summaryTitle = !status
+    ? error
+      ? t('settings.setupGuideUnknownTitle')
+      : t('settings.setupGuideCheckingTitle')
+    : isComplete
+      ? t('settings.setupGuideCompleteTitle')
+      : t('settings.setupGuideIncompleteTitle');
+  const summaryMessage = !status
+    ? error
+      ? t('settings.setupGuideUnknownSummary')
+      : t('settings.setupGuideCheckingSummary')
+    : requiredMissing.length
+      ? t('settings.setupGuideMissingSummary', {
+        count: requiredMissing.length,
+        labels: requiredMissing.slice(0, 3).map((check) => check.title).join(listSeparator),
+      })
+      : t('settings.setupGuideReadySummary');
+
+  if (isHidden) {
+    return (
+      <div className="rounded-2xl border settings-border bg-card/90 px-4 py-3 shadow-soft-card">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-foreground">{t('settings.setupGuideHiddenTitle')}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-text">{t('settings.setupGuideHiddenDescription')}</p>
+          </div>
+          <Button type="button" variant="settings-secondary" size="sm" onClick={() => setIsHidden(false)}>
+            {t('settings.setupGuideOpen')}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <SettingsSectionCard
+      title={t('settings.setupGuideTitle')}
+      description={t('settings.setupGuideDescription')}
+    >
+      <div data-testid="first-run-setup-card" className="space-y-4">
+        <div className="flex flex-col gap-3 rounded-2xl border settings-border bg-background/35 px-4 py-4 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-foreground">
+              {summaryTitle}
+            </p>
+            <p className="mt-1 text-xs leading-6 text-muted-text">
+              {summaryMessage}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="settings-secondary"
+              size="sm"
+              disabled={isLoading}
+              isLoading={isLoading}
+              loadingText={t('settings.setupGuideRefreshing')}
+              onClick={() => void onRefresh()}
+            >
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              {t('settings.setupGuideRefresh')}
+            </Button>
+            <Button type="button" variant="settings-secondary" size="sm" onClick={() => setIsHidden(true)}>
+              {t('settings.setupGuideHide')}
+            </Button>
+          </div>
+        </div>
+
+        {error ? <ApiErrorAlert error={error} /> : null}
+
+        {isLoading && !status ? (
+          <p className="text-sm text-muted-text">{t('common.loading')}</p>
+        ) : null}
+
+        {status ? (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {status.checks.map((check) => (
+              <div
+                key={check.key}
+                className="rounded-2xl border settings-border bg-card/65 px-4 py-3"
+              >
+                <div className="flex items-start gap-3">
+                  {getSetupCheckIcon(check)}
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold text-foreground">{check.title}</p>
+                      <span className="rounded-full border settings-border bg-background/60 px-2 py-0.5 text-[11px] font-medium text-muted-text">
+                        {getSetupCheckStatusLabel(check, t)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-muted-text">{check.message}</p>
+                    {check.nextStep ? (
+                      <p className="mt-2 text-xs leading-5 text-secondary-text">{check.nextStep}</p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="settings-secondary" size="sm" onClick={() => onSelectCategory('ai_model')}>
+            {t('settings.setupGuideConfigureLlm')}
+          </Button>
+          <Button type="button" variant="settings-secondary" size="sm" onClick={() => onSelectCategory('base')}>
+            {t('settings.setupGuideAddStocks')}
+          </Button>
+          <Button type="button" variant="settings-secondary" size="sm" onClick={() => onSelectCategory('notification')}>
+            {t('settings.setupGuideConfigureNotification')}
+          </Button>
+          <Button
+            type="button"
+            variant="settings-primary"
+            size="sm"
+            disabled={!canRunSmoke || isSaving || isRunningSmoke}
+            isLoading={isRunningSmoke}
+            loadingText={t('settings.setupGuideSmokeRunning')}
+            title={!firstStockCode ? t('settings.setupGuideSmokeNeedsStock') : undefined}
+            onClick={() => void onRunSmoke()}
+          >
+            <Play className="h-4 w-4" aria-hidden="true" />
+            {t('settings.setupGuideRunSmoke')}
+          </Button>
+        </div>
+
+        {!canRunSmoke && status ? (
+          <p className="text-xs leading-6 text-muted-text">
+            {firstStockCode ? t('settings.setupGuideSmokeNotReady') : t('settings.setupGuideSmokeNeedsStock')}
+          </p>
+        ) : null}
+        {smokeError ? <ApiErrorAlert error={smokeError} /> : null}
+        {!smokeError && smokeSuccess ? (
+          <SettingsAlert title={t('settings.actionSuccess')} message={smokeSuccess} variant="success" />
+        ) : null}
+      </div>
+    </SettingsSectionCard>
+  );
+};
 
 function parseScheduleTimes(scheduleTimesValue?: string, fallbackValue?: string) {
   const values = String(scheduleTimesValue ?? '')
@@ -576,7 +791,14 @@ const SettingsPage: React.FC = () => {
   const [schedulerStatusRefreshToken, setSchedulerStatusRefreshToken] = useState(0);
   const [schedulerRuntimeEnabled, setSchedulerRuntimeEnabled] = useState<boolean | null>(null);
   const [schedulerOverrideFromUi, setSchedulerOverrideFromUi] = useState<boolean | null>(null);
+  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
+  const [isRefreshingSetupStatus, setIsRefreshingSetupStatus] = useState(false);
+  const [setupStatusError, setSetupStatusError] = useState<ParsedApiError | null>(null);
+  const [isRunningSetupSmoke, setIsRunningSetupSmoke] = useState(false);
+  const [setupSmokeError, setSetupSmokeError] = useState<ParsedApiError | null>(null);
+  const [setupSmokeSuccess, setSetupSmokeSuccess] = useState('');
   const envBackupImportRef = useRef<HTMLInputElement | null>(null);
+  const setupStatusRequestIdRef = useRef(0);
   const desktopRuntimeApi = getDesktopRuntimeApi();
   const isDesktopRuntime = Boolean(desktopRuntimeApi);
   const canCheckDesktopUpdate = Boolean(
@@ -618,9 +840,36 @@ const SettingsPage: React.FC = () => {
 
   const currentChangedItems = getChangedItems();
 
+  const refreshSetupStatus = useCallback(async () => {
+    const requestId = setupStatusRequestIdRef.current + 1;
+    setupStatusRequestIdRef.current = requestId;
+    setSetupStatusError(null);
+    setIsRefreshingSetupStatus(true);
+    try {
+      const status = await systemConfigApi.getSetupStatus();
+      if (setupStatusRequestIdRef.current !== requestId) {
+        return;
+      }
+      setSetupStatus(status);
+    } catch (error: unknown) {
+      if (setupStatusRequestIdRef.current !== requestId) {
+        return;
+      }
+      setSetupStatusError(getParsedApiError(error));
+    } finally {
+      if (setupStatusRequestIdRef.current === requestId) {
+        setIsRefreshingSetupStatus(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void refreshSetupStatus();
+  }, [refreshSetupStatus]);
 
   useEffect(() => {
     if (!toast) {
@@ -682,6 +931,7 @@ const SettingsPage: React.FC = () => {
 
   const rawActiveItems = itemsByCategory[activeCategory] || [];
   const rawActiveItemMap = new Map(rawActiveItems.map((item) => [item.key, String(item.value ?? '')]));
+  const firstSetupStockCode = parseSetupStockList(getConfigItem(itemsByCategory.base || [], 'STOCK_LIST')?.value)[0] || '';
   const alphasiftItem = (itemsByCategory.data_source || []).find((item) => item.key === 'ALPHASIFT_ENABLED');
   const alphasiftEnabled = String(alphasiftItem?.value ?? '').trim().toLowerCase() === 'true';
   const hasConfiguredChannels = Boolean((rawActiveItemMap.get('LLM_CHANNELS') || '').trim());
@@ -760,6 +1010,13 @@ const SettingsPage: React.FC = () => {
       : activeCategory === 'agent'
         ? rawActiveItems.filter((item) => !AGENT_HIDDEN_KEYS.has(item.key))
       : rawActiveItems;
+  const promptCacheAdvancedItems = activeCategory === 'ai_model'
+    ? activeItems.filter(isPromptCacheAdvancedSetting)
+    : [];
+  const visibleActiveItems = activeCategory === 'ai_model'
+    ? activeItems.filter((item) => !isPromptCacheAdvancedSetting(item))
+    : activeItems;
+  const hasActiveConfigItems = visibleActiveItems.length > 0 || promptCacheAdvancedItems.length > 0;
   const isEnvBackupAllowed = isDesktopRuntime || authEnabled;
   const envBackupActionDisabled = isLoading || isSaving || isExportingEnv || isImportingEnv || !isEnvBackupAllowed;
 
@@ -828,6 +1085,7 @@ const SettingsPage: React.FC = () => {
         setSchedulerStatusRefreshToken((current) => current + 1);
       }
       notifySystemConfigChanged();
+      void refreshSetupStatus();
       setEnvBackupActionSuccess(t('settings.envImported'));
     } catch (error: unknown) {
       setEnvBackupActionError(getParsedApiError(error));
@@ -911,6 +1169,7 @@ const SettingsPage: React.FC = () => {
     if (changedSchedulerSettings) {
       setSchedulerStatusRefreshToken((current) => current + 1);
     }
+    void refreshSetupStatus();
     if (!changedAlphaSiftItem) {
       return;
     }
@@ -968,6 +1227,54 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  const handleRunSetupSmoke = async () => {
+    setSetupSmokeError(null);
+    setSetupSmokeSuccess('');
+
+    if (!setupStatus?.readyForSmoke) {
+      setSetupSmokeError(createParsedApiError({
+        title: t('settings.setupGuideSmokeUnavailableTitle'),
+        message: t('settings.setupGuideSmokeNotReady'),
+        rawMessage: t('settings.setupGuideSmokeNotReady'),
+        category: 'missing_params',
+      }));
+      return;
+    }
+
+    if (!firstSetupStockCode) {
+      setSetupSmokeError(createParsedApiError({
+        title: t('settings.setupGuideSmokeUnavailableTitle'),
+        message: t('settings.setupGuideSmokeNeedsStock'),
+        rawMessage: t('settings.setupGuideSmokeNeedsStock'),
+        category: 'missing_params',
+      }));
+      return;
+    }
+
+    setIsRunningSetupSmoke(true);
+    try {
+      const result = await analysisApi.analyzeAsync({
+        stockCode: firstSetupStockCode,
+        reportType: 'brief',
+        asyncMode: true,
+        notify: false,
+        originalQuery: firstSetupStockCode,
+        selectionSource: 'manual',
+      });
+      const taskId = 'taskId' in result ? result.taskId : result.accepted?.[0]?.taskId;
+      setSetupSmokeSuccess(
+        taskId
+          ? t('settings.setupGuideSmokeAcceptedWithTask', { stock: firstSetupStockCode, taskId })
+          : t('settings.setupGuideSmokeAccepted', { stock: firstSetupStockCode }),
+      );
+      void refreshSetupStatus();
+    } catch (error: unknown) {
+      setSetupSmokeError(getParsedApiError(error));
+    } finally {
+      setIsRunningSetupSmoke(false);
+    }
+  };
+
   const desktopUpdateNotice = getDesktopUpdateNotice(desktopUpdateState, t);
   const shouldGuardActiveConfigPanel = activeCategory === 'notification' || activeCategory === 'agent';
   const activeConfigPanelErrorTitle = activeCategory === 'agent' ? t('settings.agentSettings') : t('settings.notificationSettings');
@@ -976,12 +1283,12 @@ const SettingsPage: React.FC = () => {
       ? <>Check and provide the desktop log <code>desktop.log</code>, plus the release version, Windows version, and trigger path.</>
       : <>请查看并提供桌面端日志 <code>desktop.log</code>，同时补充 release 版本、Windows 版本和触发入口。</>
     : t('settings.diagnosticHintWeb');
-  const activeConfigPanel = activeItems.length ? (
+  const activeConfigPanel = hasActiveConfigItems ? (
     <SettingsSectionCard
       title={t('settings.activePanelTitle')}
       description={getCategoryDescription(activeCategory as SystemConfigCategory, '', uiLanguage) || t('settings.activePanelDescription')}
     >
-      {activeItems.map((item) => (
+      {visibleActiveItems.map((item) => (
         <SettingsField
           key={item.key}
           item={item}
@@ -991,6 +1298,33 @@ const SettingsPage: React.FC = () => {
           issues={issueByKey[item.key] || []}
         />
       ))}
+      {promptCacheAdvancedItems.length ? (
+        <details className="group/prompt-cache rounded-[1.15rem] border border-[var(--settings-border)] bg-[var(--settings-surface)] p-4 shadow-soft-card transition-[background-color,border-color,box-shadow] duration-200 hover:border-[var(--settings-border-strong)] hover:bg-[var(--settings-surface-hover)]">
+          <summary className="flex cursor-pointer list-none items-start justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm font-semibold text-foreground">
+                {t('settings.promptCacheAdvancedTitle')}
+              </p>
+              <p className="text-xs leading-5 text-muted-text">
+                {t('settings.promptCacheAdvancedDescription')}
+              </p>
+            </div>
+            <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-text transition-transform group-open/prompt-cache:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="mt-4 space-y-4">
+            {promptCacheAdvancedItems.map((item) => (
+              <SettingsField
+                key={item.key}
+                item={item}
+                value={item.value}
+                disabled={isSaving}
+                onChange={setDraftValue}
+                issues={issueByKey[item.key] || []}
+              />
+            ))}
+          </div>
+        </details>
+      ) : null}
     </SettingsSectionCard>
   ) : (
     <EmptyState
@@ -1070,6 +1404,21 @@ const SettingsPage: React.FC = () => {
           </aside>
 
           <section className="space-y-4">
+            <FirstRunSetupCard
+              status={setupStatus}
+              isLoading={isRefreshingSetupStatus}
+              error={setupStatusError}
+              firstStockCode={firstSetupStockCode}
+              isSaving={isSaving}
+              isRunningSmoke={isRunningSetupSmoke}
+              smokeError={setupSmokeError}
+              smokeSuccess={setupSmokeSuccess}
+              onRefresh={refreshSetupStatus}
+              onSelectCategory={setActiveCategory}
+              onRunSmoke={handleRunSetupSmoke}
+              listSeparator={uiLanguage === 'en' ? ', ' : '、'}
+              t={t}
+            />
             {alphasiftItem ? (
               <SettingsSectionCard
                 title={t('settings.alphaSift')}
@@ -1300,6 +1649,7 @@ const SettingsPage: React.FC = () => {
                   maskToken={maskToken}
                   onMerged={async () => {
                     await refreshAfterExternalSave(['STOCK_LIST']);
+                    void refreshSetupStatus();
                   }}
                   disabled={isSaving || isLoading}
                 />
@@ -1316,6 +1666,7 @@ const SettingsPage: React.FC = () => {
                   maskToken={maskToken}
                   onSaved={async (updatedItems) => {
                     await refreshAfterExternalSave(updatedItems.map((item) => item.key));
+                    void refreshSetupStatus();
                   }}
                   disabled={isSaving || isLoading}
                 />
@@ -1337,7 +1688,7 @@ const SettingsPage: React.FC = () => {
                 />
               </SettingsPanelErrorBoundary>
             ) : null}
-            {shouldGuardActiveConfigPanel && activeItems.length ? (
+            {shouldGuardActiveConfigPanel && hasActiveConfigItems ? (
               <SettingsPanelErrorBoundary
                 title={activeConfigPanelErrorTitle}
                 resetKey={`${activeCategory}:${configVersion}`}
