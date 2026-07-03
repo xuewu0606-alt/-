@@ -3421,8 +3421,9 @@ class DataFetcherManager:
         has_stock_flow = False
         if isinstance(stock_flow, dict):
             has_stock_flow = any(v is not None for v in stock_flow.values())
-        # 东财(akshare)不可用时，用 Tushare moneyflow 兜底个股资金流
-        if not has_stock_flow:
+        # 东财(akshare)不可用时，用 Tushare moneyflow 兜底个股资金流；
+        # adapter 明确 not_supported（该市场不适用资金流）时不兜底
+        if not has_stock_flow and str(payload.get("status", "")) != "not_supported":
             ts_flow = self._try_tushare_stock_flow(stock_code)
             if ts_flow and any(v is not None for v in ts_flow.values()):
                 stock_flow = ts_flow

@@ -149,6 +149,8 @@ class TestFetcherSourceOptimization(unittest.TestCase):
                 "AkshareFetcher",
                 "PytdxFetcher",
                 "BaostockFetcher",
+                # 本地定制：GlobalStockFetcher 零认证直连源，无条件注册
+                "GlobalStockFetcher",
                 "YfinanceFetcher",
             ],
         )
