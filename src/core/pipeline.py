@@ -780,6 +780,7 @@ class StockAnalysisPipeline:
 
             # Step 8: 保存分析历史记录
             if result and result.success:
+                self._flag_incoherent_sniper_points(result)
                 try:
                     self._emit_progress(97, f"{stock_name}：正在保存分析报告")
                     context_snapshot = self._build_context_snapshot(
@@ -1446,6 +1447,7 @@ class StockAnalysisPipeline:
 
             # 保存分析历史记录
             if result and result.success:
+                self._flag_incoherent_sniper_points(result)
                 try:
                     agent_context_snapshot = self._build_context_snapshot(
                         enhanced_context={
@@ -2121,6 +2123,44 @@ class StockAnalysisPipeline:
                     trend_result,
                     report_language,
                 )
+
+    def _flag_incoherent_sniper_points(self, result: "AnalysisResult") -> None:
+        """点位一致性校验：LLM 给出的买卖点位失真时显式标注，不静默修改点位。
+
+        校验项：止损<买入<止盈 排序、盈亏比≥1.5、止损宽度、点位偏离现价幅度。
+        违规时写入 battle_plan.points_validation 并在核心结论追加⚠️提示，
+        使 Web 报告与 brief 推送都能看到，避免失真点位直接指导当日操作。
+        """
+        try:
+            from src.utils.sniper_points import extract_sniper_points, validate_sniper_points
+
+            points = extract_sniper_points(result)
+            if not any(points.values()):
+                return
+            current_price = getattr(result, "current_price", None)
+            violations = validate_sniper_points(points, current_price=current_price)
+            if not violations:
+                return
+            dashboard = result.dashboard if isinstance(result.dashboard, dict) else None
+            if dashboard is not None:
+                battle = dashboard.get("battle_plan")
+                if not isinstance(battle, dict):
+                    battle = {}
+                    dashboard["battle_plan"] = battle
+                battle["points_validation"] = violations
+                core = dashboard.get("core_conclusion")
+                if isinstance(core, dict):
+                    one_sentence = str(core.get("one_sentence") or "")
+                    warning = f"⚠️点位校验：{violations[0]}"
+                    if warning not in one_sentence:
+                        core["one_sentence"] = (one_sentence + " " + warning).strip()
+            logger.warning(
+                "[%s] 狙击点位一致性校验未通过: %s",
+                getattr(result, "code", "?"),
+                "；".join(violations),
+            )
+        except Exception as e:
+            logger.debug("sniper point validation skipped: %s", e)
 
     @staticmethod
     def _stop_loss_fallback_from_trend(

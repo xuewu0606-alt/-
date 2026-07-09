@@ -892,6 +892,33 @@ def _sanitize_trend_analysis_for_prompt(
     return trend_dict
 
 
+# 追高护栏阈值：价格偏离 MA20 超过此百分比视为抛物线拉伸（超买回落风险）。
+# 起因：000811 冰轮环境 2026-07-06 乖离MA5 仅 4.78% 溜过 5% 检查，
+# 但已偏离 MA20 +31%（匀速上涨时 MA5 贴价格），随后 3 日 -19%。
+_MA20_EXTENSION_WARN_PCT = 15.0
+
+
+def _bias_warning_zh(trend: Dict[str, Any], *, legacy: bool) -> str:
+    """综合 MA5 追高 + MA20 抛物线拉伸的乖离警告文案。"""
+    bias_ma5 = _safe_float(trend.get('bias_ma5'), default=0.0)
+    bias_ma20 = _safe_float(trend.get('bias_ma20'), default=0.0)
+    if bias_ma5 > 5:
+        return "🚨 超过5%，严禁追高！" if legacy else "🚨 偏离较大，需谨慎评估追高风险"
+    if bias_ma20 > _MA20_EXTENSION_WARN_PCT:
+        return (
+            f"🚨 远离MA20 {bias_ma20:+.1f}%，抛物线拉伸、超买回落风险高，"
+            "严禁追高，持仓优先考虑减仓"
+        )
+    return "✅ 安全范围" if legacy else "✅ 位置相对可控"
+
+
+def _bias_ma20_row_zh(trend: Dict[str, Any]) -> str:
+    """乖离率(MA20) 表格行；超过阈值标注抛物线拉伸风险。"""
+    bias_ma20 = _safe_float(trend.get('bias_ma20'), default=0.0)
+    note = "🚨 抛物线拉伸，超买回落风险" if bias_ma20 > _MA20_EXTENSION_WARN_PCT else ""
+    return f"| 乖离率(MA20) | {bias_ma20:+.2f}% | {note} |"
+
+
 def _derive_chip_health(profit_ratio: float, concentration_90: float, language: str = "zh") -> str:
     """Derive chip_health from profit_ratio and concentration_90."""
     if profit_ratio >= 0.9:
@@ -2127,7 +2154,8 @@ class GeminiAnalyzer:
 - 例外通道：空头排列下，若“放量站上MA20 + 重大利好催化”同时成立，允许将趋势预测上调为“震荡（反转观察）”，操作建议可为轻仓试仓（不超过2成仓，`decision_type` 保持 `hold`），但必须列明确认条件（连续2-3日收盘站稳MA20）与失效止损（收盘跌回MA20下方离场）；缺任一条件仍按空头反弹处理，严禁直接给出重仓“买入/加仓”。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
+- 点位一致性硬约束：止损位必须低于理想买入点，止盈位必须高于理想买入点；盈亏比=（止盈-买入）÷（买入-止损）必须≥1.5。若按当前技术位无法同时满足，说明当下没有合格的入场结构，操作建议不得为买入/加仓，点位应写"暂无有效买点，等待回踩/企稳"，不得为了凑格式而编造点位。"""
 
     SYSTEM_PROMPT = """你是一位{market_placeholder}投资分析师，负责生成专业的【决策仪表盘】分析报告。
 
@@ -2314,7 +2342,8 @@ class GeminiAnalyzer:
 - 例外通道：空头排列下，若“放量站上MA20 + 重大利好催化”同时成立，允许将趋势预测上调为“震荡（反转观察）”，操作建议可为轻仓试仓（不超过2成仓，`decision_type` 保持 `hold`），但必须列明确认条件（连续2-3日收盘站稳MA20）与失效止损（收盘跌回MA20下方离场）；缺任一条件仍按空头反弹处理，严禁直接给出重仓“买入/加仓”。
 - 必须输出 `dashboard.phase_decision` 七字段；盘中/午休/临近收盘要给出当前动作、观察条件和下一次检查点。
 - 建议输出可选展示字段 `dashboard.signal_attribution` 六字段；解释推荐理由的构成，包括技术指标、新闻舆情、基本面、市场环境的贡献度，以及最强看多/看空信号。
-- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。"""
+- 盘前、非交易日或未知阶段不得伪造今日盘中走势；quote/daily_bars/technical 存在 stale、fallback、missing、fetch_failed、partial 或 estimated 时，`confidence_level` 不得为高。
+- 点位一致性硬约束：止损位必须低于理想买入点，止盈位必须高于理想买入点；盈亏比=（止盈-买入）÷（买入-止损）必须≥1.5。若按当前技术位无法同时满足，说明当下没有合格的入场结构，操作建议不得为买入/加仓，点位应写"暂无有效买点，等待回踩/企稳"，不得为了凑格式而编造点位。"""
 
     TEXT_SYSTEM_PROMPT = """你是一位专业的股票分析助手。
 
@@ -4015,7 +4044,7 @@ class GeminiAnalyzer:
             )
             consistency_notes = trend.get('prompt_consistency_notes', [])
             if use_legacy_default_prompt:
-                bias_warning = "🚨 超过5%，严禁追高！" if trend.get('bias_ma5', 0) > 5 else "✅ 安全范围"
+                bias_warning = _bias_warning_zh(trend, legacy=True)
                 prompt += f"""
 ### 趋势分析预判（基于交易理念）
 | 指标 | 数值 | 判定 |
@@ -4025,6 +4054,7 @@ class GeminiAnalyzer:
 | 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
 | **乖离率(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
 | 乖离率(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
+{_bias_ma20_row_zh(trend)}
 | 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
 | 系统信号 | {trend.get('buy_signal', unknown_text)} | |
 | 系统评分 | {trend.get('signal_score', 0)}/100 | |
@@ -4043,11 +4073,7 @@ class GeminiAnalyzer:
 {chr(10).join('- ' + note for note in consistency_notes)}
 """
             else:
-                bias_warning = (
-                    "🚨 偏离较大，需谨慎评估追高风险"
-                    if trend.get('bias_ma5', 0) > 5
-                    else "✅ 位置相对可控"
-                )
+                bias_warning = _bias_warning_zh(trend, legacy=False)
                 prompt += f"""
 ### 技术与结构分析（供激活技能判断参考）
 | 指标 | 数值 | 说明 |
@@ -4057,6 +4083,7 @@ class GeminiAnalyzer:
 | 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
 | **价格位置(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
 | 价格位置(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
+{_bias_ma20_row_zh(trend)}
 | 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
 | 系统信号 | {trend.get('buy_signal', unknown_text)} | |
 | 系统评分 | {trend.get('signal_score', 0)}/100 | |

@@ -97,6 +97,59 @@ def _has_any_sniper_value(points: Mapping[str, Any]) -> bool:
     return any(points.get(key) not in (None, "") for key in SNIPER_KEYS)
 
 
+# 点位一致性校验阈值。
+# 起因：002532 天山铝业 2026-07-09 报告给出 买入11.85/止损10.00/止盈12.50，
+# 盈亏比仅 0.35；601899 紫金矿业 2026-07-06 记录 止损(27.8)高于买入(26.6)。
+# LLM 自由生成的点位缺乏确定性校验，直通报告与推送，误导每日操作。
+MIN_RISK_REWARD_RATIO = 1.5
+MAX_STOP_DISTANCE_PCT = 12.0
+MAX_POINT_DEVIATION_PCT = 30.0
+
+
+def validate_sniper_points(
+    points: Mapping[str, Optional[float]],
+    current_price: Optional[float] = None,
+) -> list:
+    """Deterministic coherence checks on parsed sniper points.
+
+    Returns a list of zh violation strings; empty list means coherent.
+    Only checks fields that are present — missing values are not violations.
+    """
+    violations: list = []
+    buy = points.get("ideal_buy")
+    secondary = points.get("secondary_buy")
+    stop = points.get("stop_loss")
+    target = points.get("take_profit")
+
+    if buy and stop and stop >= buy:
+        violations.append(f"止损位({stop:g})不低于理想买入点({buy:g})，点位失真")
+    if buy and target and target <= buy:
+        violations.append(f"止盈位({target:g})不高于理想买入点({buy:g})，点位失真")
+    if buy and stop and target and stop < buy < target:
+        risk_reward = (target - buy) / (buy - stop)
+        if risk_reward < MIN_RISK_REWARD_RATIO:
+            violations.append(
+                f"盈亏比仅{risk_reward:.2f}（<{MIN_RISK_REWARD_RATIO:g}），赔率不佳"
+            )
+    if buy and stop and 0 < stop < buy:
+        stop_distance_pct = (buy - stop) / buy * 100
+        if stop_distance_pct > MAX_STOP_DISTANCE_PCT:
+            violations.append(
+                f"止损距买入点{stop_distance_pct:.1f}%过宽（>{MAX_STOP_DISTANCE_PCT:g}%）"
+            )
+    if secondary and buy and secondary > buy:
+        violations.append(f"次优买点({secondary:g})高于理想买点({buy:g})")
+    if current_price and current_price > 0:
+        for label, value in (("理想买入", buy), ("止损", stop), ("止盈", target)):
+            if value:
+                deviation_pct = abs(value - current_price) / current_price * 100
+                if deviation_pct > MAX_POINT_DEVIATION_PCT:
+                    violations.append(
+                        f"{label}位({value:g})偏离现价{deviation_pct:.0f}%，疑似失真"
+                    )
+    return violations
+
+
 def find_sniper_points(data: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
     if not isinstance(data, Mapping):
         return None
