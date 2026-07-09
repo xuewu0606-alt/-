@@ -1,0 +1,76 @@
+# 超跌反转策略（DSA 本地覆盖版）
+# 本地修订：原版仅用当日跌幅 -8%~-1% 定义"超跌"，且无企稳/反转确认，
+# 会把"今天在跌但并非超跌"的票选进来（案例：天山铝业+明泰铝业同板块领跌双选）。
+# 修订三点：
+#  1. 加 max_drawdown_20d_pct_max=-12 —— 真超跌门槛：须距20日高点回撤≥12%
+#  2. 加 rsi_status_whitelist=[oversold,neutral] + signal_score_min=45 —— 排除追反弹/低质
+#  3. 行业桶补铝/锂/光伏等关键词 —— 修复同业双选（见下方 portfolio_profile）
+name: oversold_reversal
+display_name: 超跌反转
+description: 距20日高点确有回撤、RSI 超卖企稳、流动性仍在的反转候选
+version: "1.2-dsa"
+category: reversal
+tags: [reversal, oversold, repair]
+
+screening:
+  enabled: true
+  market_scope: [cn]
+  hard_filters:
+    exclude_st: true
+    amount_min: 80000000
+    turnover_rate_min: 1.0
+    change_pct_min: -8.0
+    change_pct_max: -1.0
+    pe_ttm_min: 0
+    pe_ttm_max: 80
+    pb_min: 0
+    pb_max: 8.0
+    price_min: 3
+    price_max: 180
+    # --- 本地新增：真超跌 + 反转确认 ---
+    max_drawdown_20d_pct_max: -12.0   # 距20日高点回撤≥12%才算超跌（负值，越低回撤越深）
+    rsi_status_whitelist: [oversold, neutral]  # 排除超买态（追反弹）
+    signal_score_min: 45              # 日K质量底线，过滤破位杀跌
+  tech_weight: 0.45
+  factor_weights:
+    reversal: 0.40
+    stability: 0.20
+    liquidity: 0.18
+    value: 0.16
+    activity: 0.06
+  scoring_profile:
+    reversal_ideal_change_pct: -3.5
+    reversal_collapse_start_pct: -7.0
+    reversal_collapse_penalty_slope: 12.0
+    reversal_chase_start_pct: 0.0
+    rsi_oversold_bonus: 14.0
+    momentum_downside_start_pct: -4.0
+    activity_ideal_volume_ratio: 1.6
+    activity_ideal_turnover_rate: 3.0
+  risk_profile:
+    breakdown_change_pct: -8.5
+    chase_change_pct: 5.0
+    abnormal_volume_ratio: 5.0
+    high_turnover_rate: 12.0
+    weak_signal_score: 35.0
+  portfolio_profile:
+    max_same_bucket: 1
+    concentration_penalty: 4.0
+    buckets:
+      地产链: [地产, 房地产, 建材, 家居, 物业]
+      消费: [白酒, 食品, 家电, 零售, 消费, 医药, 农业]
+      周期: [钢铁, 煤炭, 有色, 化工, 铝, 铜, 锂, 稀土, 金属]
+      新能源: [光伏, 风电, 锂电, 电池, 储能, 新能源, 电气设备]
+      科技: [半导体, 芯片, 电子, 消费电子, 计算机, 通信, AI算力]
+      金融: [券商, 银行, 保险]
+      军工: [军工, 国防, 航空, 航天]
+  scorecard_profile:
+    controlled_reversal_min: 70.0
+    controlled_reversal_bonus: 2.0
+    volume_spike_ratio: 5.5
+  ranking_hints: |
+    优先关注：
+    1. 下跌幅度可控、不是基本面或退市风险驱动的连续杀跌
+    2. 成交额和换手仍能支撑后续修复，避免流动性塌陷
+    3. 若存在错杀、事件落地或板块修复线索，可提高优先级
+  max_output: 5
