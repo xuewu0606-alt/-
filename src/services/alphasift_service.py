@@ -1860,12 +1860,15 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
         lookback_days: int = 120,
         source: str = "akshare",
         retries: int = 2,
+        **kwargs: Any,
     ) -> Any:
         try:
             dsa_df, dsa_source = get_dsa_daily_history(code, lookback_days=lookback_days)
             normalized = _normalize_dsa_daily_history(dsa_df)
             if normalized is not None and not normalized.empty:
-                normalized.attrs["source"] = f"dsa:{dsa_source}"
+                source_label = f"dsa:{dsa_source}"
+                normalized.attrs["source"] = source_label
+                normalized.attrs["daily_source"] = source_label
                 return normalized
         except Exception as exc:
             logger.warning(
@@ -1874,7 +1877,13 @@ def _alphasift_dsa_daily_history_provider() -> Iterator[None]:
                 source,
                 exc,
             )
-        return original_fetch(code, lookback_days=lookback_days, source=source, retries=retries)
+        return original_fetch(
+            code,
+            lookback_days=lookback_days,
+            source=source,
+            retries=retries,
+            **kwargs,
+        )
 
     with _ALPHASIFT_RUNTIME_ENV_LOCK:
         setattr(daily_module, "fetch_daily_history", fetch_daily_history_with_dsa)
