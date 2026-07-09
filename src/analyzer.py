@@ -919,6 +919,54 @@ def _bias_ma20_row_zh(trend: Dict[str, Any]) -> str:
     return f"| 乖离率(MA20) | {bias_ma20:+.2f}% | {note} |"
 
 
+# 深套阈值：浮亏超过此百分比时要求给出明确止损/解套纪律，不得含糊。
+_DEEP_LOSS_PCT = 15.0
+
+
+def _format_holding_section_zh(context: Dict[str, Any]) -> str:
+    """据用户真实持仓个性化操作建议。
+
+    此前分析完全不知持仓（portfolio_context 死管道 + prompt 从不注入），
+    "观望"对持有者歧义（继续拿还是离场？）。注入实际持仓后，operation_advice
+    必须面向持有者/空仓者的真实处境。
+    """
+    pc = context.get("portfolio_context")
+    if not isinstance(pc, dict):
+        return ""
+    held = bool(pc.get("held"))
+    if not held:
+        return (
+            "\n### 你的实际持仓状态\n"
+            "- 当前**未持有**本股。操作建议面向空仓者（买入/观望），"
+            "点位为潜在入场参考，须遵守不追高与盈亏比≥1.5约束。\n"
+        )
+    qty = pc.get("quantity")
+    avg_cost = _safe_float(pc.get("avg_cost"), default=math.nan)
+    last_price = _safe_float(pc.get("last_price"), default=math.nan)
+    pnl_pct = _safe_float(pc.get("unrealized_pnl_pct"), default=math.nan)
+    parts = ["\n### 你的实际持仓状态（据此个性化操作建议）"]
+    detail = "- 当前**持有**本股"
+    if qty:
+        detail += f"：{qty:g} 股"
+    if math.isfinite(avg_cost):
+        detail += f"，成本 {avg_cost:.3g} 元"
+    if math.isfinite(last_price):
+        detail += f"，现价 {last_price:.3g} 元"
+    if math.isfinite(pnl_pct):
+        detail += f"，浮动盈亏 **{pnl_pct:+.1f}%**"
+    parts.append(detail)
+    parts.append(
+        "- 决策要求：操作建议必须面向**持有者**，禁止输出\"买入/建仓\"（已持有）；"
+        "\"观望\"须明确为\"继续持有观察\"或\"减仓/清仓\"二选一，不得含糊。"
+    )
+    if math.isfinite(pnl_pct) and pnl_pct <= -_DEEP_LOSS_PCT:
+        parts.append(
+            f"- ⚠️ 已深套（{pnl_pct:+.1f}%）：须给出明确的止损/解套纪律"
+            "（继续持有的失效条件、或减仓离场的触发位），不得只写\"持有观望\"回避决策。"
+        )
+    return "\n".join(parts) + "\n"
+
+
 def _derive_chip_health(profit_ratio: float, concentration_90: float, language: str = "zh") -> str:
     """Derive chip_health from profit_ratio and concentration_90."""
     if profit_ratio >= 0.9:
@@ -4102,6 +4150,11 @@ class GeminiAnalyzer:
 {chr(10).join('- ' + note for note in consistency_notes)}
 """
         
+        # 注入真实持仓状态，个性化操作建议（持有者 vs 空仓者）
+        holding_section = _format_holding_section_zh(context)
+        if holding_section:
+            prompt += holding_section
+
         # 添加昨日对比数据
         if 'yesterday' in context:
             volume_change = context.get('volume_change_ratio', 'N/A')

@@ -650,7 +650,18 @@ class StockAnalysisPipeline:
             )
             if portfolio_context is not None:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
-            
+            else:
+                today_close = None
+                if isinstance(enhanced_context.get("today"), dict):
+                    try:
+                        raw_close = enhanced_context["today"].get("close")
+                        today_close = float(raw_close) if raw_close not in (None, "") else None
+                    except (TypeError, ValueError):
+                        today_close = None
+                holding_context = self._lookup_holding_context(code, today_close)
+                if holding_context is not None:
+                    enhanced_context["portfolio_context"] = holding_context
+
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
                 analysis_context_pack_summary,
@@ -2123,6 +2134,52 @@ class StockAnalysisPipeline:
                     trend_result,
                     report_language,
                 )
+
+    def _lookup_holding_context(
+        self, code: str, current_price: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
+        """查用户真实持仓，供分析个性化操作建议（持有者 vs 空仓者）。
+
+        此前 portfolio_context 是死管道（无人填充），分析对持仓完全无感。
+        绝不因查询失败影响分析主流程。
+        """
+        try:
+            from src.storage import PortfolioPosition
+
+            normalized = str(code or "").strip()
+            digits = "".join(ch for ch in normalized if ch.isdigit())
+            with self.db.session_scope() as session:
+                rows = (
+                    session.query(PortfolioPosition)
+                    .filter(PortfolioPosition.quantity > 0)
+                    .all()
+                )
+                matched = None
+                for row in rows:
+                    sym = str(row.symbol or "").strip()
+                    sym_digits = "".join(ch for ch in sym if ch.isdigit())
+                    if sym == normalized or (digits and sym_digits and sym_digits[-6:] == digits[-6:]):
+                        matched = row
+                        break
+                if matched is None:
+                    return {"held": False}
+                avg_cost = float(matched.avg_cost or 0.0)
+                last = float(current_price) if current_price else float(matched.last_price or 0.0)
+                pnl_pct = (
+                    (last - avg_cost) / avg_cost * 100.0
+                    if avg_cost > 0 and last > 0
+                    else None
+                )
+                return {
+                    "held": True,
+                    "quantity": float(matched.quantity or 0.0),
+                    "avg_cost": avg_cost,
+                    "last_price": last,
+                    "unrealized_pnl_pct": pnl_pct,
+                }
+        except Exception as exc:
+            logger.debug("[%s] 持仓查询失败（不影响分析）: %s", code, exc)
+            return None
 
     def _flag_incoherent_sniper_points(self, result: "AnalysisResult") -> None:
         """点位一致性校验：LLM 给出的买卖点位失真时显式标注，不静默修改点位。
