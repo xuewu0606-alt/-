@@ -1014,6 +1014,35 @@ def run_scheduled_analysis(
     return run_full_analysis(config, args, stock_codes, raise_errors=True)
 
 
+def _evaluate_decision_outcomes() -> None:
+    """闭环评估：对到期的决策信号计算实际结果并落库，日志输出命中率。
+
+    每个定时点分析后调用。run_outcomes 幂等：仅评估到期且未评估的信号，
+    已评估的跳过。这是准确度调优的数据前提——此前 decision_signal_outcomes
+    表长期为空，系统从未验证过自身判断的对错。绝不因评估失败影响分析主流程。
+    """
+    try:
+        from src.services.decision_signal_outcome_service import DecisionSignalOutcomeService
+
+        service = DecisionSignalOutcomeService()
+        result = service.run_outcomes(limit=200)
+        evaluated = result.get("evaluated", 0)
+        if evaluated:
+            try:
+                stats = service.get_stats()
+                completed = stats.get("completed") or 0
+                hit_rate = stats.get("hit_rate_pct")
+                rate_text = f"{hit_rate:.1f}%" if isinstance(hit_rate, (int, float)) else "n/a"
+                logger.info(
+                    "[闭环评估] 本轮评估 %d 条；累计完成 %d 条，命中率 %s（hit %d/miss %d）",
+                    evaluated, completed, rate_text, stats.get("hit", 0), stats.get("miss", 0),
+                )
+            except Exception:
+                logger.info("[闭环评估] 本轮评估 %d 条决策信号", evaluated)
+    except Exception as exc:
+        logger.warning("[闭环评估] 决策信号结果评估失败（不影响分析）: %s", exc)
+
+
 def _run_analysis_with_runtime_scheduler_lock(
     config: Config,
     args: argparse.Namespace,
@@ -1484,6 +1513,7 @@ def main() -> int:
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
                 run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                _evaluate_decision_outcomes()
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):
