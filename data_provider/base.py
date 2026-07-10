@@ -3445,6 +3445,17 @@ class DataFetcherManager:
         except Exception:
             return None
 
+    def _try_guosen_stock_flow(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """东财与 Tushare 都不可用时，从国信取个股主力资金净流入兜底。fail-open。"""
+        try:
+            from data_provider.guosen_fetcher import GuosenFetcher
+
+            if not GuosenFetcher.is_available():
+                return None
+            return GuosenFetcher().get_stock_money_flow(stock_code)
+        except Exception:
+            return None
+
     def _try_tushare_fundamentals(self, stock_code: str) -> Optional[Dict[str, Any]]:
         """东财不可用时，从 TushareFetcher 的 income+fina_indicator 兜底取基本面。fail-open。"""
         try:
@@ -3510,6 +3521,18 @@ class DataFetcherManager:
                     src_chain = []
                     payload["source_chain"] = src_chain
                 src_chain.append("capital_stock:tushare_moneyflow")
+        # 东财与 Tushare 都拿不到时，用国信主力资金净流入兜底（需配置 GS_API_KEY）
+        if not has_stock_flow and str(payload.get("status", "")) != "not_supported":
+            gs_flow = self._try_guosen_stock_flow(stock_code)
+            if gs_flow and any(v is not None for v in gs_flow.values()):
+                stock_flow = gs_flow
+                payload["stock_flow"] = gs_flow
+                has_stock_flow = True
+                src_chain = payload.get("source_chain")
+                if not isinstance(src_chain, list):
+                    src_chain = []
+                    payload["source_chain"] = src_chain
+                src_chain.append("capital_stock:guosen_mainflow")
         has_sector_rankings = bool(sector_rankings.get("top")) or bool(sector_rankings.get("bottom"))
         adapter_status = str(payload.get("status", "not_supported"))
         if has_stock_flow or has_sector_rankings:
