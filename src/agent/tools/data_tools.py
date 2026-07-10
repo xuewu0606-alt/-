@@ -723,3 +723,65 @@ get_capital_flow_tool = ToolDefinition(
 
 
 ALL_DATA_TOOLS.append(get_capital_flow_tool)
+
+
+# ============================================================
+# guosen_smart_pick（国信自然语言选股）
+# ============================================================
+
+def _handle_guosen_smart_pick(query: str, search_type: str = "stock") -> dict:
+    """国信证券自然语言选股：按财务/技术条件筛选股票。"""
+    try:
+        from data_provider.guosen_fetcher import GuosenFetcher
+
+        if not GuosenFetcher.is_available():
+            return {
+                "status": "unavailable",
+                "note": "国信选股不可用：未配置 GS_API_KEY。",
+                "candidates": [],
+            }
+        result = GuosenFetcher().smart_pick(query, search_type=search_type)
+        if not result:
+            return {"status": "unavailable", "candidates": []}
+        if result.get("error"):
+            return {"status": "error", "error": result["error"], "candidates": []}
+        candidates = result.get("candidates", [])
+        return {
+            "status": "ok",
+            "query": query,
+            "count": len(candidates),
+            "columns": result.get("columns", []),
+            "candidates": candidates[:30],
+        }
+    except Exception as exc:
+        logger.warning("guosen_smart_pick failed for %r: %s", query, exc)
+        return {"status": "error", "error": str(exc), "candidates": []}
+
+
+guosen_smart_pick_tool = ToolDefinition(
+    name="guosen_smart_pick",
+    description=(
+        "国信证券自然语言智能选股：用一句中文选股条件筛选符合的股票，"
+        "例如'市盈率小于20且换手率大于3%的有色金属股'、'近期放量突破的新能源龙头'。"
+        "返回股票代码、简称、所属行业及相关财务/技术指标。"
+        "适合按条件发现候选股；具体标的的深度分析仍用其他行情/基本面工具。"
+    ),
+    parameters=[
+        ToolParameter(
+            name="query",
+            type="string",
+            description="中文选股条件，需含明确指标或行业，如'市盈率小于15的银行股'",
+        ),
+        ToolParameter(
+            name="search_type",
+            type="string",
+            description="搜索类型：stock(A股默认)/fund/HK_stock/US_stock/NEEQ/index",
+            required=False,
+        ),
+    ],
+    handler=_handle_guosen_smart_pick,
+    category="data",
+)
+
+
+ALL_DATA_TOOLS.append(guosen_smart_pick_tool)

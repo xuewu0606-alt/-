@@ -21,8 +21,11 @@ from urllib.parse import urlencode
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://dgzt.guosen.com.cn/skills/gsnews/market/agentbot/queryFundFlow/1.0"
+_PICK_URL = "https://dgzt.guosen.com.cn/skills/agent/mcp/smart_stock_picking"
 _SOFT_NAME = "agent_skills"
 _TIMEOUT = 8.0
+_PICK_TIMEOUT = 30.0
+_PICK_SEARCH_TYPES = {"stock", "fund", "HK_stock", "US_stock", "NEEQ", "index"}
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -115,3 +118,47 @@ class GuosenFetcher:
             "inflow_5d": inflow_5d,
             "inflow_10d": inflow_10d,
         }
+
+    def smart_pick(self, query: str, search_type: str = "stock") -> Optional[Dict[str, Any]]:
+        """国信自然语言选股。query 为选股条件（如"市盈率小于20的银行股"）。
+
+        返回 {"columns": [...], "candidates": [{col: val, ...}]} 或含 error 的 dict。fail-open。
+        """
+        api_key = _resolve_api_key()
+        if not api_key:
+            return None
+        stype = search_type if search_type in _PICK_SEARCH_TYPES else "stock"
+        params = {
+            "searchstring": str(query or "").strip(),
+            "searchtype": stype,
+            "softName": _SOFT_NAME,
+            "apiKey": api_key,
+        }
+        url = f"{_PICK_URL}?{urlencode(params)}"
+        try:
+            req = urllib_request.Request(url, headers={"User-Agent": "dsa-guosen-fetcher"})
+            with urllib_request.urlopen(req, timeout=_PICK_TIMEOUT, context=_ssl_context()) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        except Exception as exc:  # noqa: BLE001 - fail-open
+            logger.debug("Guosen smart_pick failed for %r: %s", query, exc)
+            return {"error": f"guosen smart_pick request failed: {exc}", "candidates": []}
+        result = payload.get("result")
+        code = None
+        if isinstance(result, list) and result:
+            code = result[0].get("code")
+        if code != 0:
+            msg = result[0].get("msg") if isinstance(result, list) and result else "unknown"
+            return {"error": f"guosen smart_pick rejected: {msg}", "candidates": []}
+        data = payload.get("data") or []
+        table = data[0].get("table") if data and isinstance(data[0], dict) else None
+        if not isinstance(table, dict) or not table:
+            return {"columns": [], "candidates": []}
+        # table: {列名: [值...]}，按行转成候选记录
+        columns = list(table.keys())
+        row_count = max((len(v) for v in table.values() if isinstance(v, list)), default=0)
+        candidates = []
+        for i in range(row_count):
+            row = {col: (table[col][i] if isinstance(table[col], list) and i < len(table[col]) else None)
+                   for col in columns}
+            candidates.append(row)
+        return {"columns": columns, "candidates": candidates}
