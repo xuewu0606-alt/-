@@ -28,7 +28,10 @@ screening:
     price_min: 3
     price_max: 180
     # --- 本地新增：真超跌 + 反转确认 ---
-    max_drawdown_20d_pct_max: -12.0   # 距20日高点回撤≥12%才算超跌（负值，越低回撤越深）
+    max_drawdown_20d_pct_max: -12.0   # 窗口内曾有≥12%峰谷回撤（历史跌幅确认）
+    # 关键：现价必须仍低于前20日高点≥12%（v1.2 只用上面字段，比亚迪曾跌12%后
+    # 反弹回贴高点仍入选——"历史坑"≠"当前超跌"。breakout_20d_pct=现价vs前20日高。
+    breakout_20d_pct_max: -12.0
     rsi_status_whitelist: [oversold, neutral]  # 排除超买态（追反弹）
     signal_score_min: 45              # 日K质量底线，过滤破位杀跌
   tech_weight: 0.45
@@ -55,7 +58,8 @@ screening:
     weak_signal_score: 35.0
   portfolio_profile:
     max_same_bucket: 1
-    concentration_penalty: 4.0
+    # 4.0 罚分太轻挤不掉同业双选（中国铝业+南山铝业同轮再现），加重到 12
+    concentration_penalty: 12.0
     buckets:
       地产链: [地产, 房地产, 建材, 家居, 物业]
       消费: [白酒, 食品, 家电, 零售, 消费, 医药, 农业]
