@@ -186,6 +186,10 @@ class EventMonitor:
     def __init__(self):
         self.rules: List[AlertRule] = []
         self._callbacks: List[Callable[[TriggeredAlert], None]] = []
+        # 每个 monitor 实例（=每轮告警周期）内的行情缓存：
+        # 同一只股票多条规则只拉一次行情，避免每条规则重复请求数据源。
+        self._quote_cache: Dict[str, Any] = {}
+        self._fetcher_manager: Any = None
 
     def add_alert(self, rule: AlertRule) -> None:
         """Register a new alert rule."""
@@ -261,12 +265,21 @@ class EventMonitor:
         return None
 
     def _fetch_realtime_quote(self, stock_code: str) -> Any:
-        from data_provider import DataFetcherManager
+        # monitor 实例内复用同一个 manager：此前每条规则 new DataFetcherManager()
+        # 会重复初始化 Tushare + 全部 8 个数据源。函数内 import 保持测试可 patch。
+        if self._fetcher_manager is None:
+            from data_provider import DataFetcherManager
 
-        return DataFetcherManager().get_realtime_quote(stock_code)
+            self._fetcher_manager = DataFetcherManager()
+        return self._fetcher_manager.get_realtime_quote(stock_code)
 
     async def _get_realtime_quote(self, stock_code: str) -> Any:
-        return await asyncio.to_thread(self._fetch_realtime_quote, stock_code)
+        key = str(stock_code or "").strip()
+        if key in self._quote_cache:
+            return self._quote_cache[key]
+        quote = await asyncio.to_thread(self._fetch_realtime_quote, key)
+        self._quote_cache[key] = quote
+        return quote
 
     async def _check_price(self, rule: PriceAlert) -> Optional[TriggeredAlert]:
         """Check price alert against realtime quote."""

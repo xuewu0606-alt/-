@@ -1523,6 +1523,21 @@ def main() -> int:
                 alert_worker = AlertWorker(config_provider=_reload_runtime_config)
 
                 def event_monitor_task():
+                    # 非交易时段（午休/盘后/休市）行情不变，跳过整轮告警评估，
+                    # 避免无意义地逐条拉行情（门控只在生产入口，测试直调 run_once 不受影响）。
+                    try:
+                        from src.core.trading_calendar import MarketPhase, infer_market_phase
+
+                        phase = infer_market_phase("cn")
+                        if phase in (
+                            MarketPhase.LUNCH_BREAK,
+                            MarketPhase.POSTMARKET,
+                            MarketPhase.NON_TRADING,
+                        ):
+                            logger.debug("[EventMonitor] A股当前 %s，本轮跳过", phase.value)
+                            return
+                    except Exception:
+                        pass  # 相位判断失败 fail-open，照常评估
                     stats = alert_worker.run_once()
                     triggered_count = stats.get("triggered", 0)
                     if triggered_count:
