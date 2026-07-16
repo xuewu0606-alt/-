@@ -495,13 +495,29 @@ class TushareFetcher(BaseFetcher):
                     end_date=ts_end,
                 )
             else:
-                # Regular A-share stocks use daily interface
-                df = self._api.daily(
-                    ts_code=ts_code,
-                    start_date=ts_start,
-                    end_date=ts_end,
-                )
-            
+                # A股优先用前复权（qfq）：daily 接口为不复权，除权除息日产生假缺口，
+                # 会污染均线/乖离/突破判断（实例：601899 2026-06-26 XD日被误判"强烈看空"，
+                # 随后10日+10.4%）。pro_bar 需要 adj_factor 权限，失败则回退不复权并告警。
+                df = None
+                try:
+                    import tushare as ts
+
+                    df = ts.pro_bar(
+                        ts_code=ts_code,
+                        adj='qfq',
+                        start_date=ts_start,
+                        end_date=ts_end,
+                        api=self._api,
+                    )
+                except Exception as bar_exc:
+                    logger.warning(f"Tushare pro_bar(qfq) 失败，回退不复权 daily: {bar_exc}")
+                if df is None:
+                    df = self._api.daily(
+                        ts_code=ts_code,
+                        start_date=ts_start,
+                        end_date=ts_end,
+                    )
+
             return df
             
         except Exception as e:
