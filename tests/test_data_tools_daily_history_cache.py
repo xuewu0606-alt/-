@@ -98,8 +98,9 @@ class DailyHistoryCacheToolTest(unittest.TestCase):
         self.assertTrue(result["partial_cache"])
         self.assertEqual(result["actual_records"], 30)
         self.assertEqual(result["requested_days"], 60)
-        self.assertEqual(result["data"][0]["date"], str(target - timedelta(days=29)))
-        self.assertEqual(result["data"][-1]["date"], str(target))
+        # data 已压缩为 CSV rows（省 token）；每行首字段为 date
+        self.assertEqual(result["rows"][0].split(",")[0], str(target - timedelta(days=29))[:10])
+        self.assertEqual(result["rows"][-1].split(",")[0], str(target)[:10])
         manager.get_daily_data.assert_not_called()
 
     def test_prefers_fuller_candidate_when_dates_tie(self) -> None:
@@ -174,7 +175,7 @@ class DailyHistoryCacheToolTest(unittest.TestCase):
             result = self._run_with_frozen_date(target, "600519", days=60)
 
         self.assertEqual(result["total_records"], 1)
-        self.assertEqual(result["data"][0]["date"], str(target))
+        self.assertEqual(result["rows"][0].split(",")[0], str(target)[:10])
 
     def test_db_read_exception_falls_back_to_fetch(self) -> None:
         target = date(2026, 4, 24)

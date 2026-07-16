@@ -342,12 +342,35 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
                 exc,
             )
 
-    # Convert DataFrame to list of dicts (last N records)
-    records = df.tail(min(effective_days, len(df))).to_dict(orient="records")
-    # Ensure date is string
+    # 上下文压缩：K线以 CSV 紧凑表返回（原 dict-records 键名重复60次+浮点长尾，
+    # 每股约 3-5K token；压缩后约省 60-70%，LLM 读 CSV 无障碍）。
+    tail_df = df.tail(min(effective_days, len(df)))
+    records = tail_df.to_dict(orient="records")
+
+    def _fmt(value: Any, nd: int = 2) -> str:
+        if value is None:
+            return ""
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if f != f:  # NaN
+            return ""
+        if nd == 0:
+            return str(int(f))
+        return f"{f:.{nd}f}".rstrip("0").rstrip(".")
+
+    csv_columns = "date,open,high,low,close,volume,amount,pct_chg,ma5,ma10,ma20,volume_ratio"
+    csv_rows = []
     for r in records:
-        if "date" in r:
-            r["date"] = str(r["date"])
+        csv_rows.append(",".join([
+            str(r.get("date"))[:10],
+            _fmt(r.get("open")), _fmt(r.get("high")), _fmt(r.get("low")), _fmt(r.get("close")),
+            _fmt(r.get("volume"), 0), _fmt(r.get("amount"), 0),
+            _fmt(r.get("pct_chg")),
+            _fmt(r.get("ma5")), _fmt(r.get("ma10")), _fmt(r.get("ma20")),
+            _fmt(r.get("volume_ratio")),
+        ]))
 
     response_code = stock_code
     if source == "db_cache" and records:
@@ -362,7 +385,9 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
         "actual_records": len(records),
         "partial_cache": source == "db_cache" and len(records) < effective_days,
         "total_records": len(records),
-        "data": records,
+        "data_format": "csv",
+        "columns": csv_columns,
+        "rows": csv_rows,
     }, metadata)
 
 
@@ -781,6 +806,13 @@ guosen_smart_pick_tool = ToolDefinition(
     ],
     handler=_handle_guosen_smart_pick,
     category="data",
+    # 市场级筛选（输入是选股条件而非单一 stock_code），不声明 stock 维度
+    policy=ToolPolicy.declared(
+        read_only=True,
+        side_effects=["network_read"],
+        permissions=["market_data:read"],
+        scope_dimensions=[],
+    ),
 )
 
 
